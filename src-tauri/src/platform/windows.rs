@@ -56,8 +56,8 @@ use windows_sys::Win32::{
         },
         WindowsAndMessaging::{
             CallNextHookEx, GUITHREADINFO, GetForegroundWindow, GetGUIThreadInfo, GetMessageW,
-            GetWindowRect, GetWindowThreadProcessId, HC_ACTION, KBDLLHOOKSTRUCT, MSG,
-            PostThreadMessageW, SetForegroundWindow, SetWindowsHookExW, UnhookWindowsHookEx,
+            GetWindowRect, GetWindowThreadProcessId, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_ALTDOWN,
+            MSG, PostThreadMessageW, SetForegroundWindow, SetWindowsHookExW, UnhookWindowsHookEx,
             WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
         },
     },
@@ -1004,6 +1004,10 @@ unsafe extern "system" fn keyboard_hook(code: i32, w_param: WPARAM, l_param: LPA
             let pressed = matches!(w_param as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
             let released = matches!(w_param as u32, WM_KEYUP | WM_SYSKEYUP);
 
+            if matches!(data.vkCode as u16, VK_MENU | VK_LMENU | VK_RMENU) {
+                QUICK_SEARCH_SUPPRESSED.store(false, Ordering::Release);
+            }
+
             if AUTOCOMPLETE_VISIBLE.load(Ordering::Acquire)
                 && matches!(data.vkCode as u16, VK_UP | VK_DOWN | VK_ESCAPE)
                 && plain_navigation_pressed()
@@ -1046,7 +1050,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, w_param: WPARAM, l_param: LPA
             }
 
             if data.vkCode == u32::from(VK_SPACE) {
-                if pressed && alt_space_pressed() {
+                if pressed && alt_space_pressed(&data) {
                     if QUICK_SEARCH_SUPPRESSED
                         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                         .is_err()
@@ -1276,10 +1280,8 @@ fn ctrl_z_pressed() -> bool {
     control_pressed && !conflicting_modifier
 }
 
-fn alt_space_pressed() -> bool {
-    let alt_pressed = [VK_MENU, VK_LMENU, VK_RMENU]
-        .into_iter()
-        .any(|key| unsafe { GetAsyncKeyState(i32::from(key)) } < 0);
+fn alt_space_pressed(event: &KBDLLHOOKSTRUCT) -> bool {
+    let alt_pressed = event.flags & LLKHF_ALTDOWN != 0;
     let conflicting_modifier = [VK_CONTROL, VK_LWIN, VK_RWIN, VK_LCONTROL, VK_RCONTROL]
         .into_iter()
         .any(|key| unsafe { GetAsyncKeyState(i32::from(key)) } < 0);
