@@ -1,6 +1,18 @@
-use std::sync::{Arc, RwLock};
+use std::{
+    io, mem, ptr,
+    sync::{Arc, RwLock},
+};
 
-use tauri::{App, Emitter, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Wry};
+use tauri::{App, Emitter, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Wry};
+use windows_sys::Win32::{
+    Foundation::{HWND, POINT, RECT},
+    Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, MonitorFromWindow,
+    },
+    UI::WindowsAndMessaging::{
+        GetWindowRect, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+    },
+};
 
 #[derive(Clone)]
 pub struct QuickSearchWindow {
@@ -31,12 +43,17 @@ impl QuickSearchWindow {
         })
     }
 
-    pub fn open(&self, target_window: isize, anchor_x: i32, anchor_y: i32) {
+    pub fn open(&self, target_window: isize, anchor: Option<(i32, i32)>) {
         if let Ok(mut current) = self.target_window.write() {
             *current = target_window;
         }
 
-        self.center_on_anchor_monitor(anchor_x, anchor_y);
+        if let Err(error) = self.center_on_target_monitor(target_window, anchor) {
+            tracing::warn!(%error, "failed to position quick search on target monitor");
+            if let Err(error) = self.window.center() {
+                tracing::warn!(%error, "failed to center quick search");
+            }
+        }
         if let Err(error) = self.window.show() {
             tracing::warn!(%error, "failed to show quick search");
             return;
@@ -63,50 +80,71 @@ impl QuickSearchWindow {
         self.target_window.read().map(|target| *target).unwrap_or(0)
     }
 
-    fn center_on_anchor_monitor(&self, anchor_x: i32, anchor_y: i32) {
-        let Ok(Some(monitor)) = self
+    fn center_on_target_monitor(
+        &self,
+        target_window: isize,
+        anchor: Option<(i32, i32)>,
+    ) -> io::Result<()> {
+        let monitor = anchor
+            .map(|(x, y)| unsafe { MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST) })
+            .filter(|monitor| !monitor.is_null())
+            .unwrap_or_else(|| unsafe {
+                MonitorFromWindow(target_window as HWND, MONITOR_DEFAULTTONEAREST)
+            });
+        if monitor.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+
+        let mut monitor_info = MONITORINFO {
+            cbSize: mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if unsafe { GetMonitorInfoW(monitor, &mut monitor_info) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let hwnd = self
             .window
-            .monitor_from_point(anchor_x as f64, anchor_y as f64)
-        else {
-            if let Err(error) = self.window.center() {
-                tracing::warn!(%error, "failed to center quick search");
-            }
-            return;
-        };
+            .hwnd()
+            .map_err(|error| io::Error::other(error.to_string()))?
+            .0 as HWND;
 
-        let work_area = monitor.work_area();
-
-        // Move while hidden so Windows applies the target monitor's DPI before
-        // the final centering calculation.
-        if let Err(error) = self.window.set_position(work_area.position) {
-            tracing::warn!(%error, "failed to move quick search to target monitor");
-            return;
-        }
-
-        let Ok(window_size) = self.window.outer_size() else {
-            if let Err(error) = self.window.center() {
-                tracing::warn!(%error, "failed to center quick search");
-            }
-            return;
-        };
-
-        let x = work_area.position.x
-            + work_area
-                .size
-                .width
-                .saturating_sub(window_size.width)
-                .div_ceil(2) as i32;
-        let y = work_area.position.y
-            + work_area
-                .size
-                .height
-                .saturating_sub(window_size.height)
-                .div_ceil(2) as i32;
-
-        if let Err(error) = self.window.set_position(PhysicalPosition::new(x, y)) {
-            tracing::warn!(%error, "failed to center quick search on target monitor");
-        }
+        // The first move applies the target monitor's DPI. The second pass
+        // uses the resulting physical size for exact centering.
+        center_native_window(hwnd, monitor_info.rcWork)?;
+        center_native_window(hwnd, monitor_info.rcWork)
     }
+}
+
+fn center_native_window(hwnd: HWND, work_area: RECT) -> io::Result<()> {
+    let mut window_rect = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut window_rect) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let width = window_rect.right - window_rect.left;
+    let height = window_rect.bottom - window_rect.top;
+    let available_width = work_area.right - work_area.left;
+    let available_height = work_area.bottom - work_area.top;
+    let x = work_area.left + (available_width - width).max(0) / 2;
+    let y = work_area.top + (available_height - height).max(0) / 2;
+
+    if unsafe {
+        SetWindowPos(
+            hwnd,
+            ptr::null_mut(),
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(())
 }
 
 pub fn hide_on_close(window: &tauri::Window, event: &tauri::WindowEvent) {

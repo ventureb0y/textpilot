@@ -517,7 +517,7 @@ pub fn run() {
                 let search_window = quick_search.clone();
                 let search_overlay = autocomplete_overlay.clone();
                 let quick_search_controller =
-                    QuickSearchController::new(move |target_window, anchor_x, anchor_y| {
+                    QuickSearchController::new(move |target_window, anchor| {
                         search_overlay.hide();
                         if search_window.is_visible() {
                             let previous_target = search_window.target_window();
@@ -526,7 +526,7 @@ pub fn run() {
                                 tracing::warn!(%error, "failed to restore quick search target");
                             }
                         } else {
-                            search_window.open(target_window, anchor_x, anchor_y);
+                            search_window.open(target_window, anchor);
                         }
                     });
                 let input_monitor = match InputMonitor::start(

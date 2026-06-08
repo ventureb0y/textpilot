@@ -499,7 +499,7 @@ impl AutocorrectController {
     }
 }
 
-type QuickSearchPresenter = Arc<dyn Fn(isize, i32, i32) + Send + Sync>;
+type QuickSearchPresenter = Arc<dyn Fn(isize, Option<(i32, i32)>) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct QuickSearchController {
@@ -509,15 +509,15 @@ pub struct QuickSearchController {
 impl QuickSearchController {
     pub fn new<F>(presenter: F) -> Self
     where
-        F: Fn(isize, i32, i32) + Send + Sync + 'static,
+        F: Fn(isize, Option<(i32, i32)>) + Send + Sync + 'static,
     {
         Self {
             presenter: Arc::new(presenter),
         }
     }
 
-    fn open(&self, target_window: isize, anchor_x: i32, anchor_y: i32) {
-        (self.presenter)(target_window, anchor_x, anchor_y);
+    fn open(&self, target_window: isize, anchor: Option<(i32, i32)>) {
+        (self.presenter)(target_window, anchor);
     }
 }
 
@@ -724,10 +724,9 @@ impl SnippetWorker {
             self.matcher.reset();
             self.autocomplete.hide();
             self.last_replacement = None;
-            let (anchor_x, anchor_y) =
+            let anchor =
                 quick_search_screen_position(event.foreground_window, &self.anchor_locator);
-            self.quick_search
-                .open(event.foreground_window, anchor_x, anchor_y);
+            self.quick_search.open(event.foreground_window, anchor);
             return;
         }
 
@@ -1677,12 +1676,13 @@ fn suggestion_screen_position(
         })
 }
 
-fn quick_search_screen_position(window: isize, anchor_locator: &InputAnchorLocator) -> (i32, i32) {
+fn quick_search_screen_position(
+    window: isize,
+    anchor_locator: &InputAnchorLocator,
+) -> Option<(i32, i32)> {
     caret_screen_position(window)
         .or_else(|| anchor_locator.focused_input_anchor())
         .map(|anchor| (anchor.x, anchor.bottom))
-        .or_else(|| window_center(window))
-        .unwrap_or((24, 24))
 }
 
 fn caret_screen_position(window: isize) -> Option<SuggestionAnchor> {
@@ -1729,18 +1729,6 @@ fn window_anchor(window: isize) -> Option<SuggestionAnchor> {
         rectangle.right,
         rectangle.bottom,
     )
-}
-
-fn window_center(window: isize) -> Option<(i32, i32)> {
-    let mut rectangle = RECT::default();
-    if unsafe { GetWindowRect(window as *mut _, &mut rectangle) } == 0 {
-        return None;
-    }
-
-    Some((
-        rectangle.left + (rectangle.right - rectangle.left) / 2,
-        rectangle.top + (rectangle.bottom - rectangle.top) / 2,
-    ))
 }
 
 fn normalize_trigger(trigger: &str) -> String {
