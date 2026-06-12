@@ -536,6 +536,11 @@ select {
   overflow-y: auto;
 }
 
+.category-list.dragging-categories {
+  cursor: grabbing;
+  user-select: none;
+}
+
 .category-list button {
   display: grid;
   grid-template-columns: 25px minmax(0, 1fr) auto;
@@ -595,6 +600,28 @@ select {
 
 .tree-category {
   position: relative;
+  cursor: grab;
+  touch-action: none;
+  transition:
+    opacity 120ms ease,
+    box-shadow 120ms ease,
+    transform 120ms ease;
+}
+
+.tree-category:active {
+  cursor: grabbing;
+}
+
+.tree-category.dragging {
+  opacity: 0.42;
+}
+
+.tree-category.drop-before {
+  box-shadow: inset 0 2px #4d8b68;
+}
+
+.tree-category.drop-after {
+  box-shadow: inset 0 -2px #4d8b68;
 }
 
 .tree-category::before {

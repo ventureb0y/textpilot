@@ -1,6 +1,6 @@
 [package]
 name = "textpilot"
-version = "0.0.1"
+version = "0.0.2"
 description = "Local Windows utility for snippets, autocomplete, and autocorrection"
 authors = ["TextPilot contributors"]
 edition = "2024"

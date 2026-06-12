@@ -938,8 +938,21 @@ fn ensure_category_path(
             None => {
                 transaction
                     .execute(
-                        "INSERT INTO categories (profile_id, parent_id, name, path)
-                         VALUES (?1, ?2, ?3, ?4)",
+                        "INSERT INTO categories (
+                            profile_id, parent_id, name, path, sort_order
+                         )
+                         VALUES (
+                            ?1,
+                            ?2,
+                            ?3,
+                            ?4,
+                            COALESCE((
+                                SELECT MAX(sort_order) + 1
+                                FROM categories
+                                WHERE profile_id = ?1
+                                  AND parent_id IS ?2
+                            ), 0)
+                         )",
                         params![profile_id, parent_id, part, current_path],
                     )
                     .map_err(|error| error.to_string())?;

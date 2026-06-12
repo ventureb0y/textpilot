@@ -8,8 +8,8 @@ use serde::Serialize;
 use storage::{
     BackupSummary, CreateCategoryInput, CreatePhraseInput, DashboardData, Database,
     DictionaryWordInput, ExportResult, ImportConflictStrategy, ImportPreview, ImportResult,
-    ProfileSnapshotSummary, QuickSearchItem, RenameCategoryInput, RestoreBackupResult,
-    RestoreProfileSnapshotResult, UpdatePhraseInput,
+    ProfileSnapshotSummary, QuickSearchItem, RenameCategoryInput, ReorderCategoryInput,
+    RestoreBackupResult, RestoreProfileSnapshotResult, UpdatePhraseInput,
 };
 use tauri::{Manager, State, WebviewWindow};
 use tracing_subscriber::EnvFilter;
@@ -122,6 +122,14 @@ fn delete_category(state: State<'_, AppState>, category_id: i64) -> Result<(), S
     state
         .database
         .delete_category(category_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn reorder_category(state: State<'_, AppState>, input: ReorderCategoryInput) -> Result<(), String> {
+    state
+        .database
+        .reorder_category(input)
         .map_err(|error| error.to_string())
 }
 
@@ -570,6 +578,7 @@ pub fn run() {
             create_category,
             rename_category,
             delete_category,
+            reorder_category,
             create_phrase,
             update_phrase,
             set_phrase_enabled,

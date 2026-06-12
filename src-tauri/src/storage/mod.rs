@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
 };
@@ -18,7 +18,7 @@ pub use transfer::{
 
 const INITIAL_SCHEMA: &str = include_str!("schema.sql");
 const INTEGRITY_TRIGGERS: &str = include_str!("integrity_triggers.sql");
-const CURRENT_SCHEMA_VERSION: u32 = 4;
+const CURRENT_SCHEMA_VERSION: u32 = 5;
 
 pub struct Database {
     connection: Mutex<Connection>,
@@ -109,6 +109,14 @@ pub struct RenameCategoryInput {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ReorderCategoryInput {
+    pub category_id: i64,
+    pub target_category_id: i64,
+    pub place_after: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreatePhraseInput {
     pub title: String,
     pub snippet: String,
@@ -194,18 +202,40 @@ impl Database {
 
         let categories = {
             let mut statement = connection.prepare(
-                "SELECT
-                    categories.id,
-                    categories.parent_id,
-                    categories.name,
-                    categories.path,
-                    COUNT(phrases.id),
-                    (SELECT COUNT(*) FROM dictionary_words WHERE category_id = categories.id)
-                 FROM categories
-                 LEFT JOIN phrases ON phrases.category_id = categories.id
-                 WHERE categories.profile_id = ?1
-                 GROUP BY categories.id
-                 ORDER BY categories.path",
+                "WITH RECURSIVE category_tree (
+                    id, parent_id, name, path, sort_path
+                 ) AS (
+                    SELECT
+                        id,
+                        parent_id,
+                        name,
+                        path,
+                        printf('%020d-%020d', sort_order, id)
+                    FROM categories
+                    WHERE profile_id = ?1 AND parent_id IS NULL
+
+                    UNION ALL
+
+                    SELECT
+                        child.id,
+                        child.parent_id,
+                        child.name,
+                        child.path,
+                        category_tree.sort_path || '/' ||
+                            printf('%020d-%020d', child.sort_order, child.id)
+                    FROM categories AS child
+                    JOIN category_tree ON child.parent_id = category_tree.id
+                    WHERE child.profile_id = ?1
+                 )
+                 SELECT
+                    category_tree.id,
+                    category_tree.parent_id,
+                    category_tree.name,
+                    category_tree.path,
+                    (SELECT COUNT(*) FROM phrases WHERE category_id = category_tree.id),
+                    (SELECT COUNT(*) FROM dictionary_words WHERE category_id = category_tree.id)
+                 FROM category_tree
+                 ORDER BY category_tree.sort_path",
             )?;
             statement
                 .query_map([active_profile_id], |row| {
@@ -394,8 +424,19 @@ impl Database {
         };
 
         connection.execute(
-            "INSERT INTO categories (profile_id, parent_id, name, path)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO categories (profile_id, parent_id, name, path, sort_order)
+             VALUES (
+                ?1,
+                ?2,
+                ?3,
+                ?4,
+                COALESCE((
+                    SELECT MAX(sort_order) + 1
+                    FROM categories
+                    WHERE profile_id = ?1
+                      AND parent_id IS ?2
+                ), 0)
+             )",
             params![active_profile_id, input.parent_id, name, path],
         )?;
 
@@ -453,6 +494,72 @@ impl Database {
         )?;
 
         ensure_category_changed(deleted)
+    }
+
+    pub fn reorder_category(&self, input: ReorderCategoryInput) -> Result<()> {
+        if input.category_id == input.target_category_id {
+            return Ok(());
+        }
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let active_profile_id = active_profile_id(&transaction)?;
+        let category_parent_id: Option<i64> = transaction.query_row(
+            "SELECT parent_id
+             FROM categories
+             WHERE id = ?1 AND profile_id = ?2",
+            params![input.category_id, active_profile_id],
+            |row| row.get(0),
+        )?;
+        let target_parent_id: Option<i64> = transaction.query_row(
+            "SELECT parent_id
+             FROM categories
+             WHERE id = ?1 AND profile_id = ?2",
+            params![input.target_category_id, active_profile_id],
+            |row| row.get(0),
+        )?;
+
+        if category_parent_id != target_parent_id {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "categories can only be reordered within the same parent".into(),
+            ));
+        }
+
+        let mut category_ids = {
+            let mut statement = transaction.prepare(
+                "SELECT id
+                 FROM categories
+                 WHERE profile_id = ?1 AND parent_id IS ?2
+                 ORDER BY sort_order, id",
+            )?;
+            statement
+                .query_map(params![active_profile_id, category_parent_id], |row| {
+                    row.get::<_, i64>(0)
+                })?
+                .collect::<Result<Vec<_>>>()?
+        };
+        let category_index = category_ids
+            .iter()
+            .position(|id| *id == input.category_id)
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        category_ids.remove(category_index);
+        let target_index = category_ids
+            .iter()
+            .position(|id| *id == input.target_category_id)
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        let insertion_index = target_index + usize::from(input.place_after);
+        category_ids.insert(insertion_index, input.category_id);
+
+        for (sort_order, category_id) in category_ids.into_iter().enumerate() {
+            transaction.execute(
+                "UPDATE categories
+                 SET sort_order = ?1, updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?2 AND profile_id = ?3",
+                params![sort_order as i64, category_id, active_profile_id],
+            )?;
+        }
+
+        transaction.commit()
     }
 
     pub fn create_phrase(&self, input: CreatePhraseInput) -> Result<()> {
@@ -770,6 +877,7 @@ fn initialize_connection(connection: &mut Connection) -> Result<()> {
     migrate_phrases_to_plain_triggers(&transaction)?;
     migrate_dictionary_word_enabled(&transaction)?;
     migrate_normalized_keys(&transaction)?;
+    migrate_category_sort_order(&transaction)?;
     transaction.execute_batch(INTEGRITY_TRIGGERS)?;
     transaction.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
 
@@ -856,6 +964,48 @@ fn ensure_category_changed(changed_rows: usize) -> Result<()> {
     } else {
         Err(rusqlite::Error::QueryReturnedNoRows)
     }
+}
+
+fn migrate_category_sort_order(transaction: &rusqlite::Transaction<'_>) -> Result<()> {
+    if table_has_column(transaction, "categories", "sort_order")? {
+        return Ok(());
+    }
+
+    transaction.execute(
+        "ALTER TABLE categories
+         ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
+        [],
+    )?;
+    let categories = {
+        let mut statement = transaction.prepare(
+            "SELECT id, profile_id, parent_id
+             FROM categories
+             ORDER BY profile_id, path COLLATE NOCASE, id",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>>>()?
+    };
+    let mut sibling_positions: HashMap<(i64, Option<i64>), i64> = HashMap::new();
+
+    for (category_id, profile_id, parent_id) in categories {
+        let sort_order = sibling_positions
+            .entry((profile_id, parent_id))
+            .or_default();
+        transaction.execute(
+            "UPDATE categories SET sort_order = ?1 WHERE id = ?2",
+            params![*sort_order, category_id],
+        )?;
+        *sort_order += 1;
+    }
+
+    Ok(())
 }
 
 fn validate_phrase(title: &str, snippet: &str, body: &str) -> Result<()> {
@@ -1092,11 +1242,12 @@ fn migrate_phrases_to_plain_triggers(transaction: &rusqlite::Transaction<'_>) ->
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::{Connection, params};
+    use rusqlite::{Connection, Result, params};
 
     use super::{
         CreateCategoryInput, CreatePhraseInput, Database, DictionaryWordInput,
-        migrate_normalized_keys, migrate_phrases_to_plain_triggers,
+        ReorderCategoryInput, migrate_category_sort_order, migrate_normalized_keys,
+        migrate_phrases_to_plain_triggers,
     };
 
     #[test]
@@ -1130,6 +1281,131 @@ mod tests {
         let dashboard = database.dashboard_data().unwrap();
         assert_eq!(dashboard.phrases.len(), 1);
         assert_eq!(dashboard.categories[0].phrase_count, 1);
+    }
+
+    #[test]
+    fn reorders_sibling_categories_with_their_subtrees() {
+        let database = Database::open(":memory:").expect("database should open");
+        database
+            .create_category(CreateCategoryInput {
+                name: "Alpha".into(),
+                parent_id: None,
+            })
+            .unwrap();
+        let alpha_id = database.dashboard_data().unwrap().categories[0].id;
+        database
+            .create_category(CreateCategoryInput {
+                name: "Alpha child".into(),
+                parent_id: Some(alpha_id),
+            })
+            .unwrap();
+        database
+            .create_category(CreateCategoryInput {
+                name: "Beta".into(),
+                parent_id: None,
+            })
+            .unwrap();
+        database
+            .create_category(CreateCategoryInput {
+                name: "Gamma".into(),
+                parent_id: None,
+            })
+            .unwrap();
+
+        let dashboard = database.dashboard_data().unwrap();
+        let gamma_id = dashboard
+            .categories
+            .iter()
+            .find(|category| category.name == "Gamma")
+            .unwrap()
+            .id;
+        database
+            .reorder_category(ReorderCategoryInput {
+                category_id: gamma_id,
+                target_category_id: alpha_id,
+                place_after: false,
+            })
+            .unwrap();
+
+        let names = database
+            .dashboard_data()
+            .unwrap()
+            .categories
+            .into_iter()
+            .map(|category| category.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["Gamma", "Alpha", "Alpha child", "Beta"]);
+    }
+
+    #[test]
+    fn rejects_reordering_categories_from_different_levels() {
+        let database = Database::open(":memory:").expect("database should open");
+        database
+            .create_category(CreateCategoryInput {
+                name: "Root".into(),
+                parent_id: None,
+            })
+            .unwrap();
+        let root_id = database.dashboard_data().unwrap().categories[0].id;
+        database
+            .create_category(CreateCategoryInput {
+                name: "Child".into(),
+                parent_id: Some(root_id),
+            })
+            .unwrap();
+        let child_id = database
+            .dashboard_data()
+            .unwrap()
+            .categories
+            .into_iter()
+            .find(|category| category.name == "Child")
+            .unwrap()
+            .id;
+
+        let result = database.reorder_category(ReorderCategoryInput {
+            category_id: child_id,
+            target_category_id: root_id,
+            place_after: false,
+        });
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn category_sort_order_migration_preserves_alphabetical_sibling_order() {
+        let mut connection = Connection::open_in_memory().expect("database should open");
+        connection
+            .execute_batch(
+                "CREATE TABLE categories (
+                    id INTEGER PRIMARY KEY,
+                    profile_id INTEGER NOT NULL,
+                    parent_id INTEGER,
+                    name TEXT NOT NULL,
+                    path TEXT NOT NULL
+                );
+                INSERT INTO categories (id, profile_id, parent_id, name, path) VALUES
+                    (1, 1, NULL, 'Zulu', 'Zulu'),
+                    (2, 1, NULL, 'Alpha', 'Alpha'),
+                    (3, 1, 2, 'Zulu child', 'Alpha/Zulu child'),
+                    (4, 1, 2, 'Alpha child', 'Alpha/Alpha child');",
+            )
+            .expect("legacy categories should be created");
+
+        let transaction = connection.transaction().expect("transaction should start");
+        migrate_category_sort_order(&transaction).expect("migration should succeed");
+        transaction.commit().expect("migration should commit");
+
+        let positions = {
+            let mut statement = connection
+                .prepare("SELECT id, sort_order FROM categories ORDER BY id")
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert_eq!(positions, [(1, 1), (2, 0), (3, 1), (4, 0)]);
     }
 
     #[test]

@@ -136,6 +136,17 @@
   let editingCategoryId: number | null = null;
   let categoryParentId = "";
   let categoryActionError = "";
+  let draggedCategoryId: number | null = null;
+  let categoryDropTargetId: number | null = null;
+  let categoryDropIndicatorId: number | null = null;
+  let categoryDropPosition: "before" | "after" | null = null;
+  let categoryPointerId: number | null = null;
+  let categoryPointerCategoryId: number | null = null;
+  let categoryPointerStartX = 0;
+  let categoryPointerStartY = 0;
+  let categoryPointerDragging = false;
+  let suppressCategoryClick = false;
+  let reorderingCategories = false;
   let saving = false;
   let formError = "";
   let phraseActionError = "";
@@ -1020,6 +1031,155 @@
     return Math.max(0, category.path.split("/").length - 1);
   }
 
+  function resetCategoryDrag() {
+    draggedCategoryId = null;
+    categoryDropTargetId = null;
+    categoryDropIndicatorId = null;
+    categoryDropPosition = null;
+    categoryPointerId = null;
+    categoryPointerCategoryId = null;
+    categoryPointerDragging = false;
+  }
+
+  function startCategoryPointer(event: PointerEvent, category: CategorySummary) {
+    if (
+      event.button !== 0 ||
+      !event.isPrimary ||
+      saving ||
+      reorderingCategories
+    ) {
+      return;
+    }
+
+    categoryPointerId = event.pointerId;
+    categoryPointerCategoryId = category.id;
+    categoryPointerStartX = event.clientX;
+    categoryPointerStartY = event.clientY;
+    categoryPointerDragging = false;
+    draggedCategoryId = null;
+    categoryDropTargetId = null;
+    categoryDropIndicatorId = null;
+    categoryDropPosition = null;
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+  }
+
+  function updateCategoryDropTarget(clientX: number, clientY: number) {
+    const targetElement = document
+      .elementFromPoint(clientX, clientY)
+      ?.closest<HTMLElement>("[data-category-id]");
+    const targetId = Number(targetElement?.dataset.categoryId);
+    const target = data?.categories.find((category) => category.id === targetId);
+    const draggedCategory = data?.categories.find(
+      (category) => category.id === draggedCategoryId,
+    );
+    if (
+      !draggedCategory ||
+      !targetElement ||
+      !target ||
+      draggedCategory.id === target.id ||
+      draggedCategory.parentId !== target.parentId
+    ) {
+      categoryDropTargetId = null;
+      categoryDropIndicatorId = null;
+      categoryDropPosition = null;
+      return;
+    }
+
+    const bounds = targetElement.getBoundingClientRect();
+    const placeAfter = clientY >= bounds.top + bounds.height / 2;
+    const subtree = data?.categories.filter(
+      (category) =>
+        category.path === target.path || category.path.startsWith(`${target.path}/`),
+    );
+
+    categoryDropTargetId = target.id;
+    categoryDropPosition = placeAfter ? "after" : "before";
+    categoryDropIndicatorId = placeAfter
+      ? subtree?.at(-1)?.id ?? target.id
+      : target.id;
+  }
+
+  function moveCategoryPointer(event: PointerEvent) {
+    if (
+      event.pointerId !== categoryPointerId ||
+      categoryPointerCategoryId === null
+    ) {
+      return;
+    }
+
+    if (!categoryPointerDragging) {
+      const distance = Math.hypot(
+        event.clientX - categoryPointerStartX,
+        event.clientY - categoryPointerStartY,
+      );
+      if (distance < 5) return;
+
+      categoryPointerDragging = true;
+      draggedCategoryId = categoryPointerCategoryId;
+    }
+
+    event.preventDefault();
+    updateCategoryDropTarget(event.clientX, event.clientY);
+  }
+
+  async function finishCategoryPointer(event: PointerEvent) {
+    if (event.pointerId !== categoryPointerId) return;
+
+    const pointerTarget = event.currentTarget as HTMLElement;
+    if (pointerTarget.hasPointerCapture(event.pointerId)) {
+      pointerTarget.releasePointerCapture(event.pointerId);
+    }
+
+    const wasDragging = categoryPointerDragging;
+    const categoryId = draggedCategoryId;
+    const targetCategoryId = categoryDropTargetId;
+    const placeAfter = categoryDropPosition === "after";
+    resetCategoryDrag();
+
+    if (!wasDragging) return;
+
+    event.preventDefault();
+    suppressCategoryClick = true;
+    window.setTimeout(() => {
+      suppressCategoryClick = false;
+    });
+
+    if (
+      categoryId === null ||
+      targetCategoryId === null
+    ) {
+      return;
+    }
+
+    reorderingCategories = true;
+    categoryActionError = "";
+    try {
+      await invoke("reorder_category", {
+        input: { categoryId, targetCategoryId, placeAfter },
+      });
+      await loadDashboard();
+    } catch (cause) {
+      categoryActionError = readableError(cause);
+    } finally {
+      reorderingCategories = false;
+    }
+  }
+
+  function cancelCategoryPointer(event: PointerEvent) {
+    if (event.pointerId !== categoryPointerId) return;
+    resetCategoryDrag();
+  }
+
+  function selectPhraseCategory(categoryId: number) {
+    if (suppressCategoryClick) return;
+    selectedCategory = categoryId;
+  }
+
+  function selectDictionaryCategory(categoryId: number) {
+    if (suppressCategoryClick) return;
+    selectedDictionaryCategory = categoryId;
+  }
+
   function categorySubtreePhraseCount(category: CategorySummary) {
     return (
       data?.categories
@@ -1184,7 +1344,7 @@
             </button>
           </div>
 
-          <div class="category-list">
+          <div class:dragging-categories={categoryPointerDragging} class="category-list">
             <button
               class:active={selectedCategory === "all"}
               onclick={() => (selectedCategory = "all")}
@@ -1194,12 +1354,20 @@
               <small>{data?.phrases.length ?? 0}</small>
             </button>
 
-            {#each data?.categories ?? [] as category}
+            {#each data?.categories ?? [] as category (category.id)}
               <button
                 class:active={selectedCategory === category.id}
+                class:dragging={draggedCategoryId === category.id}
+                class:drop-before={categoryDropIndicatorId === category.id && categoryDropPosition === "before"}
+                class:drop-after={categoryDropIndicatorId === category.id && categoryDropPosition === "after"}
                 class="tree-category"
                 style={`padding-left: ${9 + categoryDepth(category) * 15}px`}
-                onclick={() => (selectedCategory = category.id)}
+                data-category-id={category.id}
+                onclick={() => selectPhraseCategory(category.id)}
+                onpointerdown={(event) => startCategoryPointer(event, category)}
+                onpointermove={moveCategoryPointer}
+                onpointerup={finishCategoryPointer}
+                onpointercancel={cancelCategoryPointer}
                 title={category.path}
               >
                 <span class="category-icon"><Icon name="folder" size={15} /></span>
@@ -1414,7 +1582,7 @@
             </div>
           </div>
 
-          <div class="category-list">
+          <div class:dragging-categories={categoryPointerDragging} class="category-list">
             <button
               class:active={selectedDictionaryCategory === "all"}
               onclick={() => (selectedDictionaryCategory = "all")}
@@ -1424,12 +1592,20 @@
               <small>{data?.dictionaryWords.length ?? 0}</small>
             </button>
 
-            {#each data?.categories ?? [] as category}
+            {#each data?.categories ?? [] as category (category.id)}
               <button
                 class:active={selectedDictionaryCategory === category.id}
+                class:dragging={draggedCategoryId === category.id}
+                class:drop-before={categoryDropIndicatorId === category.id && categoryDropPosition === "before"}
+                class:drop-after={categoryDropIndicatorId === category.id && categoryDropPosition === "after"}
                 class="tree-category"
                 style={`padding-left: ${9 + categoryDepth(category) * 15}px`}
-                onclick={() => (selectedDictionaryCategory = category.id)}
+                data-category-id={category.id}
+                onclick={() => selectDictionaryCategory(category.id)}
+                onpointerdown={(event) => startCategoryPointer(event, category)}
+                onpointermove={moveCategoryPointer}
+                onpointerup={finishCategoryPointer}
+                onpointercancel={cancelCategoryPointer}
                 title={category.path}
               >
                 <span class="category-icon"><Icon name="folder" size={15} /></span>
