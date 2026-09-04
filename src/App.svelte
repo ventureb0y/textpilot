@@ -1,5 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { getVersion } from "@tauri-apps/api/app";
+  import { check, type Update } from "@tauri-apps/plugin-updater";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
   import ConfirmDialog from "./lib/ConfirmDialog.svelte";
@@ -189,6 +191,15 @@
   let quickSearchSaving = false;
   let quickSearchError = "";
   let confirmation: ConfirmationState | null = null;
+  let currentAppVersion = "0.0.5";
+  let availableUpdate: Update | null = null;
+  let updateModalOpen = false;
+  let updateChecking = false;
+  let updateInstalling = false;
+  let updateMessage = "";
+  let updateError = "";
+  let updateDownloaded = 0;
+  let updateTotal: number | null = null;
 
   let categoryName = "";
   let phraseTitle = "";
@@ -258,11 +269,21 @@
     }) ?? [];
 
   onMount(() => {
-    loadDashboard();
+    void loadDashboard();
     const inTauri = "__TAURI_INTERNALS__" in window;
     let stopListening: (() => void) | undefined;
+    let updateCheckTimer: number | undefined;
 
     if (inTauri) {
+      void getVersion()
+        .then((version) => {
+          currentAppVersion = version;
+        })
+        .catch(() => undefined);
+      updateCheckTimer = window.setTimeout(() => {
+        void checkForUpdates(false);
+      }, 3500);
+
       listen<boolean>("pause-changed", (event) => {
         paused = event.payload;
         data = data ? { ...data, isPaused: paused } : data;
@@ -273,8 +294,90 @@
       phraseModalOpen = true;
     }
 
-    return () => stopListening?.();
+    return () => {
+      stopListening?.();
+      if (updateCheckTimer !== undefined) {
+        window.clearTimeout(updateCheckTimer);
+      }
+    };
   });
+
+  async function checkForUpdates(manual: boolean) {
+    if (!("__TAURI_INTERNALS__" in window)) {
+      if (manual) {
+        updateMessage = "Проверка обновлений доступна в установленном приложении.";
+      }
+      return;
+    }
+
+    if (updateChecking || updateInstalling) return;
+
+    updateChecking = true;
+    updateError = "";
+    if (manual) {
+      updateMessage = "Проверяем наличие новой версии…";
+    }
+
+    try {
+      const previousUpdate = availableUpdate;
+      const update = await check({ timeout: 15_000 });
+      availableUpdate = update;
+      currentAppVersion = update?.currentVersion ?? (await getVersion());
+
+      if (previousUpdate) {
+        await previousUpdate.close();
+      }
+
+      if (update) {
+        updateMessage = "Доступна версия " + update.version + ".";
+        updateModalOpen = true;
+      } else if (manual) {
+        updateMessage = "Установлена актуальная версия.";
+      }
+    } catch (cause) {
+      if (manual) {
+        updateMessage = "";
+        updateError = "Не удалось проверить обновления: " + readableError(cause);
+      } else {
+        console.warn("Background update check failed", cause);
+      }
+    } finally {
+      updateChecking = false;
+    }
+  }
+
+  async function installAvailableUpdate() {
+    const update = availableUpdate;
+    if (!update || updateInstalling) return;
+
+    updateInstalling = true;
+    updateError = "";
+    updateMessage = "Загружаем обновление…";
+    updateDownloaded = 0;
+    updateTotal = null;
+
+    try {
+      await update.downloadAndInstall(
+        (event) => {
+          if (event.event === "Started") {
+            updateTotal = event.data.contentLength ?? null;
+          } else if (event.event === "Progress") {
+            updateDownloaded += event.data.chunkLength;
+          } else if (event.event === "Finished") {
+            if (updateTotal !== null) {
+              updateDownloaded = updateTotal;
+            }
+            updateMessage = "Обновление загружено. Запускаем установку…";
+          }
+        },
+        { timeout: 120_000, restartAfterInstall: true },
+      );
+    } catch (cause) {
+      updateError = "Не удалось установить обновление: " + readableError(cause);
+      updateMessage = "";
+      updateInstalling = false;
+    }
+  }
 
   async function loadDashboard() {
     loading = true;
@@ -1894,6 +1997,50 @@
         {/if}
 
         <div class="settings-grid">
+          <section class="settings-card update-settings-card">
+            <div class="settings-card-icon"><Icon name="spark" size={21} /></div>
+            <div class="settings-card-copy">
+              <span class="page-kicker">Обновления</span>
+              <h2>TextPilot <span class="update-version-badge">v{currentAppVersion}</span></h2>
+              <p>
+                Программа проверяет подписанные обновления после запуска. Установка
+                выполняется только после вашего подтверждения.
+              </p>
+            </div>
+
+            {#if availableUpdate}
+              <div class="update-available">
+                <strong>Доступна версия {availableUpdate.version}</strong>
+                <span>{availableUpdate.body || "Для этой версии нет описания изменений."}</span>
+              </div>
+            {/if}
+
+            {#if updateMessage}
+              <p class="page-success update-status-message">{updateMessage}</p>
+            {/if}
+            {#if updateError}
+              <p class="page-error update-status-message">{updateError}</p>
+            {/if}
+
+            <div class="settings-actions update-actions">
+              <button
+                class="secondary-button"
+                onclick={() => checkForUpdates(true)}
+                disabled={updateChecking || updateInstalling}
+              >
+                {updateChecking ? "Проверяем…" : "Проверить обновления"}
+              </button>
+              {#if availableUpdate}
+                <button
+                  class="primary-button"
+                  onclick={() => (updateModalOpen = true)}
+                  disabled={updateInstalling}
+                >
+                  Установить v{availableUpdate.version}
+                </button>
+              {/if}
+            </div>
+          </section>
           <section class="settings-card hotkey-settings-card">
             <div class="settings-card-icon"><Icon name="book" size={21} /></div>
             <div class="settings-card-copy">
@@ -2127,6 +2274,87 @@
     {/if}
   </section>
 </div>
+{#if updateModalOpen && availableUpdate}
+  <div
+    class="modal-backdrop"
+    role="presentation"
+    onclick={(event) => {
+      if (event.target === event.currentTarget && !updateInstalling) {
+        updateModalOpen = false;
+      }
+    }}
+  >
+    <div class="modal compact-modal update-modal" role="dialog" aria-modal="true" aria-labelledby="update-modal-title">
+      <header class="modal-header">
+        <div>
+          <span class="page-kicker">Обновление TextPilot</span>
+          <h2 id="update-modal-title">Версия {availableUpdate.version}</h2>
+        </div>
+        <button
+          class="icon-button"
+          onclick={() => (updateModalOpen = false)}
+          title="Закрыть"
+          disabled={updateInstalling}
+        >
+          <Icon name="close" size={19} />
+        </button>
+      </header>
+
+      <div class="update-modal-body">
+        <div class="update-version-route">
+          <span>v{availableUpdate.currentVersion}</span>
+          <strong>→</strong>
+          <span>v{availableUpdate.version}</span>
+        </div>
+        <p class="update-notes">
+          {availableUpdate.body || "Для этой версии нет описания изменений."}
+        </p>
+
+        {#if updateInstalling}
+          <div class="update-progress">
+            <div class:indeterminate={updateTotal === null} class="update-progress-track">
+              <span
+                style:width={updateTotal !== null && updateTotal > 0
+                  ? Math.min(100, Math.round((updateDownloaded / updateTotal) * 100)) + "%"
+                  : "35%"}
+              ></span>
+            </div>
+            <small>
+              {#if updateTotal !== null && updateTotal > 0}
+                Скачивание {Math.min(100, Math.round((updateDownloaded / updateTotal) * 100))}%
+              {:else}
+                Подготовка обновления…
+              {/if}
+            </small>
+          </div>
+        {/if}
+
+        {#if updateError}
+          <p class="page-error update-modal-error">{updateError}</p>
+        {/if}
+
+        <div class="modal-footer">
+          <button
+            type="button"
+            class="secondary-button"
+            onclick={() => (updateModalOpen = false)}
+            disabled={updateInstalling}
+          >
+            Позже
+          </button>
+          <button
+            type="button"
+            class="primary-button"
+            onclick={installAvailableUpdate}
+            disabled={updateInstalling}
+          >
+            {updateInstalling ? "Устанавливаем…" : "Обновить сейчас"}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+{/if}
 
 {#if phraseModalOpen}
   <div class="modal-backdrop" role="presentation" onclick={(event) => event.target === event.currentTarget && closePhraseModal()}>

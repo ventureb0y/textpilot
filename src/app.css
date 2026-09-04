@@ -1703,6 +1703,128 @@ code {
   margin: 0;
 }
 
+.update-settings-card {
+  grid-column: 1 / -1;
+}
+
+.update-version-badge {
+  display: inline-flex;
+  margin-left: 5px;
+  padding: 2px 7px;
+  color: #347a55;
+  font-size: 9.5px;
+  font-weight: 700;
+  vertical-align: middle;
+  border-radius: 999px;
+  background: #edf7f1;
+}
+
+.update-available {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 4px;
+  padding: 11px 12px;
+  border: 1px solid #cfe5d7;
+  border-radius: 9px;
+  background: #f3faf5;
+}
+
+.update-available strong {
+  color: #2e6f4b;
+  font-size: 11px;
+}
+
+.update-available span {
+  color: #708078;
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.update-status-message {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.update-actions {
+  align-items: center;
+}
+
+.update-modal-body {
+  padding: 20px 24px 22px;
+}
+
+.update-version-route {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: #78857d;
+  font-size: 11px;
+}
+
+.update-version-route span {
+  padding: 5px 9px;
+  color: #35684c;
+  font-weight: 700;
+  border-radius: 7px;
+  background: #edf7f1;
+}
+
+.update-version-route strong {
+  color: #9aa49e;
+}
+
+.update-notes {
+  margin: 17px 0 0;
+  color: #5f6d65;
+  font-size: 11px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.update-progress {
+  display: grid;
+  gap: 7px;
+  margin-top: 18px;
+}
+
+.update-progress small {
+  color: #7e8a83;
+  font-size: 10px;
+}
+
+.update-progress-track {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e8eeea;
+}
+
+.update-progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #3d9666;
+  transition: width 160ms ease;
+}
+
+.update-progress-track.indeterminate span {
+  animation: update-progress-indeterminate 1.2s ease-in-out infinite;
+}
+
+.update-modal-error {
+  margin-top: 16px;
+}
+
+@keyframes update-progress-indeterminate {
+  from {
+    transform: translateX(-120%);
+  }
+
+  to {
+    transform: translateX(300%);
+  }
+}
 .backup-history-card {
   grid-column: 1 / -1;
 }

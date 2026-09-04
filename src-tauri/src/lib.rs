@@ -545,6 +545,7 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .on_window_event(|window, event| {
             #[cfg(target_os = "windows")]
             {
