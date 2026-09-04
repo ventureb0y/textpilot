@@ -4,7 +4,7 @@ use std::{
     io, mem, ptr,
     sync::{
         Arc, Mutex, OnceLock, RwLock,
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         mpsc::{self, SyncSender},
     },
     thread::{self, JoinHandle},
@@ -58,7 +58,9 @@ use windows_sys::Win32::{
             CallNextHookEx, GUITHREADINFO, GetForegroundWindow, GetGUIThreadInfo, GetMessageW,
             GetWindowRect, GetWindowThreadProcessId, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_ALTDOWN,
             MSG, PostThreadMessageW, SetForegroundWindow, SetWindowsHookExW, UnhookWindowsHookEx,
-            WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
+            WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_MBUTTONDOWN,
+            WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_SYSKEYUP,
+            WM_XBUTTONDOWN,
         },
     },
 };
@@ -75,14 +77,23 @@ const MAX_AUTOCOMPLETE_CANDIDATES: usize = 6;
 const CLIPBOARD_RETRY_COUNT: usize = 10;
 const CLIPBOARD_RETRY_DELAY: Duration = Duration::from_millis(10);
 const CLIPBOARD_PASTE_DELAY: Duration = Duration::from_millis(150);
+const DIRECT_INPUT_UTF16_LIMIT: usize = 256;
 
 static HOOK_SENDER: OnceLock<SyncSender<KeyEvent>> = OnceLock::new();
 static TAB_SUPPRESSED: AtomicBool = AtomicBool::new(false);
 static BOUNDARY_SUPPRESSED: AtomicU32 = AtomicU32::new(0);
 static UNDO_SUPPRESSED: AtomicBool = AtomicBool::new(false);
 static QUICK_SEARCH_SUPPRESSED: AtomicBool = AtomicBool::new(false);
+static QUICK_SEARCH_ENABLED: AtomicBool = AtomicBool::new(true);
 static AUTOCOMPLETE_VISIBLE: AtomicBool = AtomicBool::new(false);
 static AUTOCOMPLETE_NAV_SUPPRESSED: AtomicU32 = AtomicU32::new(0);
+static KEYDOWN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static FAST_CORRECTION: OnceLock<Mutex<Option<FastCorrection>>> = OnceLock::new();
+static FAST_CORRECTION_CONTEXT_SAFE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_quick_search_enabled(enabled: bool) {
+    QUICK_SEARCH_ENABLED.store(enabled, Ordering::Release);
+}
 
 enum ClipboardSnapshot {
     Empty,
@@ -144,6 +155,9 @@ impl SnippetController {
 
     pub fn set_paused(&self, paused: bool) {
         self.inner.paused.store(paused, Ordering::Release);
+        if paused {
+            clear_fast_correction();
+        }
     }
 
     pub fn is_paused(&self) -> bool {
@@ -178,6 +192,7 @@ pub struct AutocompleteController {
 }
 
 struct AutocompleteRuntime {
+    enabled: AtomicBool,
     index: RwLock<AutocompleteIndex>,
     session: RwLock<Option<AutocompleteSession>>,
     pending_replacement: Mutex<Option<LastReplacement>>,
@@ -315,12 +330,13 @@ pub struct AcceptedAutocomplete {
 }
 
 impl AutocompleteController {
-    pub fn new<F>(words: Vec<AutocompleteEntry>, presenter: F) -> Self
+    pub fn new<F>(words: Vec<AutocompleteEntry>, enabled: bool, presenter: F) -> Self
     where
         F: Fn(Option<PositionedSuggestion>) + Send + Sync + 'static,
     {
         Self {
             inner: Arc::new(AutocompleteRuntime {
+                enabled: AtomicBool::new(enabled),
                 index: RwLock::new(AutocompleteIndex::new(words)),
                 session: RwLock::new(None),
                 pending_replacement: Mutex::new(None),
@@ -330,18 +346,35 @@ impl AutocompleteController {
     }
 
     pub fn replace_words(&self, words: Vec<AutocompleteEntry>) {
+        let replacement = AutocompleteIndex::new(words);
         if let Ok(mut index) = self.inner.index.write() {
-            index.replace(words);
+            *index = replacement;
         }
         self.hide();
     }
 
-    pub fn hide(&self) {
-        AUTOCOMPLETE_VISIBLE.store(false, Ordering::Release);
-        if let Ok(mut session) = self.inner.session.write() {
-            *session = None;
+    pub fn is_enabled(&self) -> bool {
+        self.inner.enabled.load(Ordering::Acquire)
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.inner.enabled.store(enabled, Ordering::Release);
+        if !enabled {
+            self.hide();
         }
-        (self.inner.presenter)(None);
+    }
+
+    pub fn hide(&self) {
+        let was_visible = AUTOCOMPLETE_VISIBLE.swap(false, Ordering::AcqRel);
+        let had_session = self
+            .inner
+            .session
+            .write()
+            .map(|mut session| session.take().is_some())
+            .unwrap_or(false);
+        if was_visible || had_session {
+            (self.inner.presenter)(None);
+        }
     }
 
     pub fn select(&self, index: usize) {
@@ -402,6 +435,20 @@ impl AutocompleteController {
         session.completions.get(session.selected_index).cloned()
     }
 
+    fn first_completion(&self, prefix: &str) -> Option<Completion> {
+        if !self.is_enabled() {
+            return None;
+        }
+
+        self.inner
+            .index
+            .read()
+            .ok()?
+            .completions_for(prefix, 1)
+            .into_iter()
+            .next()
+    }
+
     fn move_selection(&self, delta: isize) {
         let suggestion = {
             let Ok(mut session) = self.inner.session.write() else {
@@ -427,6 +474,10 @@ impl AutocompleteController {
         expected_window: isize,
         anchor_locator: &InputAnchorLocator,
     ) {
+        if !self.is_enabled() {
+            return;
+        }
+
         let completions = self
             .inner
             .index
@@ -489,9 +540,11 @@ impl AutocorrectController {
     }
 
     pub fn replace_words(&self, words: Vec<String>) {
+        let replacement = AutocorrectIndex::new(words);
         if let Ok(mut index) = self.index.write() {
-            index.replace(words);
+            *index = replacement;
         }
+        clear_fast_correction();
     }
 
     fn correction_for(&self, word: &str) -> Option<Correction> {
@@ -611,7 +664,12 @@ impl Drop for InputMonitor {
 enum KeyEventKind {
     Regular,
     Tab,
-    Boundary,
+    TabSnippetApplied,
+    TabCompletionApplied,
+    TabCorrectionApplied,
+    BoundaryObserved,
+    BoundaryApplied,
+    ContextReset,
     Undo,
     QuickSearch,
     AutocompletePrevious,
@@ -626,6 +684,7 @@ struct KeyEvent {
     pressed: bool,
     kind: KeyEventKind,
     foreground_window: isize,
+    sequence: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -650,6 +709,21 @@ struct LastReplacement {
     window: isize,
 }
 
+struct FastCorrection {
+    sequence: u64,
+    trigger: String,
+    snippet: Option<String>,
+    completion: Option<Completion>,
+    correction: Option<Correction>,
+    window: isize,
+}
+
+enum FastTabAction {
+    PassThrough,
+    Fallback,
+    Applied(KeyEventKind),
+}
+
 struct SnippetWorker {
     controller: SnippetController,
     autocomplete: AutocompleteController,
@@ -662,6 +736,7 @@ struct SnippetWorker {
     current_window: isize,
     current_window_is_own_process: bool,
     own_process_id: u32,
+    last_pressed_sequence: u64,
 }
 
 impl SnippetWorker {
@@ -683,13 +758,27 @@ impl SnippetWorker {
             current_window: 0,
             current_window_is_own_process: false,
             own_process_id: unsafe { GetCurrentProcessId() },
+            last_pressed_sequence: 0,
         }
     }
 
     fn handle(&mut self, event: KeyEvent) {
+        if event.pressed {
+            if self.last_pressed_sequence != 0
+                && event.sequence != self.last_pressed_sequence.wrapping_add(1)
+            {
+                self.matcher.reset();
+                self.autocomplete.hide();
+                self.last_replacement = None;
+                clear_fast_correction();
+            }
+            self.last_pressed_sequence = event.sequence;
+        }
+
         if let Some(replacement) = self.autocomplete.take_pending_replacement() {
             self.matcher.reset();
             self.last_replacement = Some(replacement);
+            clear_fast_correction();
         }
 
         if event.foreground_window != self.current_window {
@@ -699,6 +788,7 @@ impl SnippetWorker {
             self.matcher.reset();
             self.autocomplete.hide();
             self.last_replacement = None;
+            clear_fast_correction();
         }
 
         self.modifiers.update(event.vk_code, event.pressed);
@@ -707,10 +797,19 @@ impl SnippetWorker {
             return;
         }
 
+        if matches!(event.kind, KeyEventKind::ContextReset) {
+            self.matcher.reset();
+            self.autocomplete.hide();
+            self.last_replacement = None;
+            clear_fast_correction();
+            return;
+        }
+
         if self.anchor_locator.focused_input_is_password() {
             self.matcher.reset();
             self.autocomplete.hide();
             self.last_replacement = None;
+            clear_fast_correction();
             replay_suppressed_event(event);
             return;
         }
@@ -724,6 +823,11 @@ impl SnippetWorker {
             self.matcher.reset();
             self.autocomplete.hide();
             self.last_replacement = None;
+            clear_fast_correction();
+            // Opening quick search moves focus while Alt is still physically held.
+            // Do not let a missed Alt key-up leave the worker treating every
+            // subsequent keystroke as a command shortcut.
+            self.modifiers.reset();
             let anchor =
                 quick_search_screen_position(event.foreground_window, &self.anchor_locator);
             self.quick_search.open(event.foreground_window, anchor);
@@ -745,18 +849,34 @@ impl SnippetWorker {
             return;
         }
 
+        if matches!(
+            event.kind,
+            KeyEventKind::TabSnippetApplied
+                | KeyEventKind::TabCompletionApplied
+                | KeyEventKind::TabCorrectionApplied
+        ) {
+            self.handle_applied_tab(event);
+            return;
+        }
+
         if event.vk_code == u32::from(VK_TAB) {
             if matches!(event.kind, KeyEventKind::Tab) {
                 self.handle_tab(event.foreground_window);
             } else {
                 self.matcher.reset();
                 self.autocomplete.hide();
+                clear_fast_correction();
             }
             return;
         }
 
-        if matches!(event.kind, KeyEventKind::Boundary) {
-            self.handle_boundary(event);
+        if matches!(event.kind, KeyEventKind::BoundaryObserved) {
+            self.handle_observed_boundary(event);
+            return;
+        }
+
+        if matches!(event.kind, KeyEventKind::BoundaryApplied) {
+            self.handle_applied_boundary(event);
             return;
         }
 
@@ -764,12 +884,14 @@ impl SnippetWorker {
             self.matcher.reset();
             self.autocomplete.hide();
             self.last_replacement = None;
+            clear_fast_correction();
             return;
         }
 
         if event.vk_code == u32::from(VK_BACK) {
             self.last_replacement = None;
             self.matcher.backspace();
+            self.publish_fast_correction(event.sequence);
             self.refresh_autocomplete();
             return;
         }
@@ -777,6 +899,7 @@ impl SnippetWorker {
         if is_navigation_key(event.vk_code) || self.modifiers.command_modifier_active() {
             self.matcher.reset();
             self.autocomplete.hide();
+            clear_fast_correction();
             if !is_modifier_key(event.vk_code) {
                 self.last_replacement = None;
             }
@@ -786,15 +909,18 @@ impl SnippetWorker {
         if let Some(character) = translate_key(event, self.modifiers) {
             self.last_replacement = None;
             self.matcher.typed(character);
+            self.publish_fast_correction(event.sequence);
             self.refresh_autocomplete();
         } else {
             self.matcher.reset();
             self.autocomplete.hide();
             self.last_replacement = None;
+            clear_fast_correction();
         }
     }
 
     fn handle_tab(&mut self, expected_window: isize) {
+        clear_fast_correction();
         if self.current_window_is_own_process || self.controller.is_paused() {
             self.matcher.reset();
             self.autocomplete.hide();
@@ -847,13 +973,10 @@ impl SnippetWorker {
                 self.last_replacement = Some(LastReplacement {
                     original: correction.original,
                     replacement: correction.replacement,
-                    boundary: Some(KeyStroke::from(KeyEvent {
+                    boundary: Some(KeyStroke {
                         vk_code: u32::from(VK_TAB),
                         scan_code: 0,
-                        pressed: true,
-                        kind: KeyEventKind::Tab,
-                        foreground_window: expected_window,
-                    })),
+                    }),
                     window: expected_window,
                 });
             }
@@ -861,60 +984,89 @@ impl SnippetWorker {
         replay_tab();
     }
 
-    fn handle_boundary(&mut self, event: KeyEvent) {
+    fn handle_applied_tab(&mut self, event: KeyEvent) {
+        let trigger = self.matcher.take_trigger();
+        self.autocomplete.hide();
+        clear_fast_correction();
+
+        self.last_replacement = match (event.kind, trigger) {
+            (KeyEventKind::TabCompletionApplied, Some(trigger)) => self
+                .autocomplete
+                .first_completion(&trigger)
+                .map(|completion| LastReplacement {
+                    original: trigger,
+                    replacement: completion.word,
+                    boundary: None,
+                    window: event.foreground_window,
+                }),
+            (KeyEventKind::TabCorrectionApplied, Some(trigger)) => self
+                .autocorrect
+                .correction_for(&trigger)
+                .map(|correction| LastReplacement {
+                    original: correction.original,
+                    replacement: correction.replacement,
+                    boundary: Some(KeyStroke::from(event)),
+                    window: event.foreground_window,
+                }),
+            _ => None,
+        };
+    }
+
+    fn handle_observed_boundary(&mut self, event: KeyEvent) {
         self.autocomplete.hide();
 
         if let Some(character) = translate_key(event, self.modifiers)
             && is_tracked_word_character(character)
         {
-            replay_key(KeyStroke::from(event));
             self.last_replacement = None;
             if self.current_window_is_own_process || self.controller.is_paused() {
                 self.matcher.reset();
+                clear_fast_correction();
             } else {
                 self.matcher.typed(character);
+                self.publish_fast_correction(event.sequence);
                 self.refresh_autocomplete();
             }
             return;
         }
 
-        if self.current_window_is_own_process || self.controller.is_paused() {
-            self.matcher.reset();
-            self.last_replacement = None;
-            replay_key(KeyStroke::from(event));
-            return;
-        }
+        self.matcher.reset();
+        self.last_replacement = None;
+        clear_fast_correction();
+    }
 
+    fn handle_applied_boundary(&mut self, event: KeyEvent) {
+        self.autocomplete.hide();
         let word = self.matcher.take_trigger();
-        let foreground_window = unsafe { GetForegroundWindow() } as isize;
-        if foreground_window != event.foreground_window {
-            self.last_replacement = None;
-            replay_key(KeyStroke::from(event));
-            return;
-        }
-
+        clear_fast_correction();
         let correction = word
             .as_deref()
             .and_then(|word| self.autocorrect.correction_for(word));
-        if let Some(correction) = correction {
-            if let Err(error) =
-                send_replacement(correction.original.chars().count(), &correction.replacement)
-            {
-                tracing::warn!(%error, "failed to insert autocorrection");
-                self.last_replacement = None;
-            } else {
-                self.last_replacement = Some(LastReplacement {
-                    original: correction.original,
-                    replacement: correction.replacement,
-                    boundary: Some(KeyStroke::from(event)),
-                    window: event.foreground_window,
-                });
-            }
-        } else {
-            self.last_replacement = None;
-        }
+        self.last_replacement = correction.map(|correction| LastReplacement {
+            original: correction.original,
+            replacement: correction.replacement,
+            boundary: Some(KeyStroke::from(event)),
+            window: event.foreground_window,
+        });
+    }
 
-        replay_key(KeyStroke::from(event));
+    fn publish_fast_correction(&self, sequence: u64) {
+        let trigger = self.matcher.current().to_owned();
+        let snippet = self.controller.expansion_for(&trigger);
+        let completion = self.autocomplete.first_completion(&trigger);
+        let correction = self.autocorrect.correction_for(&trigger);
+        let Some(slot) = FAST_CORRECTION.get_or_init(|| Mutex::new(None)).lock().ok() else {
+            return;
+        };
+        let mut slot = slot;
+        *slot = Some(FastCorrection {
+            sequence,
+            trigger,
+            snippet,
+            completion,
+            correction,
+            window: self.current_window,
+        });
     }
 
     fn handle_undo(&mut self, expected_window: isize) {
@@ -945,7 +1097,10 @@ impl SnippetWorker {
     }
 
     fn refresh_autocomplete(&self) {
-        thread::sleep(Duration::from_millis(8));
+        if !self.autocomplete.is_enabled() {
+            return;
+        }
+
         self.autocomplete.present_for(
             self.matcher.current(),
             self.current_window,
@@ -963,6 +1118,10 @@ struct Modifiers {
 }
 
 impl Modifiers {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
     fn update(&mut self, vk_code: u32, pressed: bool) {
         match vk_code as u16 {
             VK_SHIFT | VK_LSHIFT | VK_RSHIFT => self.shift = pressed,
@@ -981,20 +1140,33 @@ impl Modifiers {
 fn run_hook_loop(ready_sender: mpsc::Sender<io::Result<u32>>) {
     let thread_id = unsafe { GetCurrentThreadId() };
     let module = unsafe { GetModuleHandleW(ptr::null()) };
-    let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), module, 0) };
+    let keyboard = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), module, 0) };
 
-    if hook.is_null() {
+    if keyboard.is_null() {
         let _ = ready_sender.send(Err(io::Error::last_os_error()));
         return;
     }
 
+    let mouse = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), module, 0) };
+    FAST_CORRECTION_CONTEXT_SAFE.store(!mouse.is_null(), Ordering::Release);
+    if mouse.is_null() {
+        tracing::warn!(
+            error = %io::Error::last_os_error(),
+            "mouse context hook is unavailable; fast replacement is disabled"
+        );
+    }
     let _ = ready_sender.send(Ok(thread_id));
     let mut message: MSG = unsafe { mem::zeroed() };
     while unsafe { GetMessageW(&mut message, ptr::null_mut(), 0, 0) } > 0 {}
 
     unsafe {
-        UnhookWindowsHookEx(hook);
+        if !mouse.is_null() {
+            UnhookWindowsHookEx(mouse);
+        }
+        UnhookWindowsHookEx(keyboard);
     }
+    FAST_CORRECTION_CONTEXT_SAFE.store(false, Ordering::Release);
+    clear_fast_correction();
 }
 
 unsafe extern "system" fn keyboard_hook(code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
@@ -1003,6 +1175,11 @@ unsafe extern "system" fn keyboard_hook(code: i32, w_param: WPARAM, l_param: LPA
         if data.dwExtraInfo != INPUT_MARKER {
             let pressed = matches!(w_param as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
             let released = matches!(w_param as u32, WM_KEYUP | WM_SYSKEYUP);
+            let sequence = if pressed {
+                KEYDOWN_SEQUENCE.fetch_add(1, Ordering::AcqRel) + 1
+            } else {
+                KEYDOWN_SEQUENCE.load(Ordering::Acquire)
+            };
 
             if matches!(data.vkCode as u16, VK_MENU | VK_LMENU | VK_RMENU) {
                 QUICK_SEARCH_SUPPRESSED.store(false, Ordering::Release);
@@ -1033,6 +1210,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, w_param: WPARAM, l_param: LPA
                                 pressed: true,
                                 kind,
                                 foreground_window: unsafe { GetForegroundWindow() } as isize,
+                                sequence,
                             })
                             .is_ok()
                     {
@@ -1050,7 +1228,10 @@ unsafe extern "system" fn keyboard_hook(code: i32, w_param: WPARAM, l_param: LPA
             }
 
             if data.vkCode == u32::from(VK_SPACE) {
-                if pressed && alt_space_pressed(&data) {
+                if pressed
+                    && QUICK_SEARCH_ENABLED.load(Ordering::Acquire)
+                    && alt_space_pressed(&data)
+                {
                     if QUICK_SEARCH_SUPPRESSED
                         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                         .is_err()
@@ -1066,6 +1247,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, w_param: WPARAM, l_param: LPA
                                 pressed: true,
                                 kind: KeyEventKind::QuickSearch,
                                 foreground_window: unsafe { GetForegroundWindow() } as isize,
+                                sequence,
                             })
                             .is_ok()
                     {
@@ -1095,6 +1277,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, w_param: WPARAM, l_param: LPA
                                 pressed: true,
                                 kind: KeyEventKind::Undo,
                                 foreground_window: unsafe { GetForegroundWindow() } as isize,
+                                sequence,
                             })
                             .is_ok()
                     {
@@ -1116,21 +1299,46 @@ unsafe extern "system" fn keyboard_hook(code: i32, w_param: WPARAM, l_param: LPA
                         return 1;
                     }
 
-                    if let Some(sender) = HOOK_SENDER.get()
-                        && sender
-                            .try_send(KeyEvent {
-                                vk_code: data.vkCode,
-                                scan_code: data.scanCode,
-                                pressed: true,
-                                kind: KeyEventKind::Tab,
-                                foreground_window: unsafe { GetForegroundWindow() } as isize,
-                            })
-                            .is_ok()
-                    {
-                        return 1;
+                    let foreground_window = unsafe { GetForegroundWindow() } as isize;
+                    let tab = KeyStroke {
+                        vk_code: data.vkCode,
+                        scan_code: data.scanCode,
+                    };
+                    match try_apply_fast_tab(sequence, foreground_window, tab) {
+                        FastTabAction::PassThrough => {
+                            TAB_SUPPRESSED.store(false, Ordering::Release);
+                        }
+                        FastTabAction::Fallback => {
+                            if let Some(sender) = HOOK_SENDER.get()
+                                && sender
+                                    .try_send(KeyEvent {
+                                        vk_code: data.vkCode,
+                                        scan_code: data.scanCode,
+                                        pressed: true,
+                                        kind: KeyEventKind::Tab,
+                                        foreground_window,
+                                        sequence,
+                                    })
+                                    .is_ok()
+                            {
+                                return 1;
+                            }
+                            TAB_SUPPRESSED.store(false, Ordering::Release);
+                        }
+                        FastTabAction::Applied(kind) => {
+                            if let Some(sender) = HOOK_SENDER.get() {
+                                let _ = sender.try_send(KeyEvent {
+                                    vk_code: data.vkCode,
+                                    scan_code: data.scanCode,
+                                    pressed: true,
+                                    kind,
+                                    foreground_window,
+                                    sequence,
+                                });
+                            }
+                            return 1;
+                        }
                     }
-
-                    TAB_SUPPRESSED.store(false, Ordering::Release);
                 } else if released && TAB_SUPPRESSED.swap(false, Ordering::AcqRel) {
                     return 1;
                 }
@@ -1138,28 +1346,60 @@ unsafe extern "system" fn keyboard_hook(code: i32, w_param: WPARAM, l_param: LPA
 
             if is_autocorrect_boundary_key(data.vkCode) {
                 if pressed && plain_boundary_pressed() {
-                    if BOUNDARY_SUPPRESSED
-                        .compare_exchange(0, data.vkCode, Ordering::AcqRel, Ordering::Acquire)
-                        .is_err()
-                    {
+                    let foreground_window = unsafe { GetForegroundWindow() } as isize;
+                    let boundary = KeyStroke {
+                        vk_code: data.vkCode,
+                        scan_code: data.scanCode,
+                    };
+                    let translated_boundary = translate_key(
+                        KeyEvent {
+                            vk_code: data.vkCode,
+                            scan_code: data.scanCode,
+                            pressed: true,
+                            kind: KeyEventKind::BoundaryObserved,
+                            foreground_window,
+                            sequence,
+                        },
+                        Modifiers {
+                            shift: shift_pressed(),
+                            ..Default::default()
+                        },
+                    );
+                    let is_text_boundary =
+                        is_fast_autocorrect_boundary(data.vkCode, translated_boundary);
+                    let suppression_acquired = is_text_boundary
+                        && BOUNDARY_SUPPRESSED
+                            .compare_exchange(0, data.vkCode, Ordering::AcqRel, Ordering::Acquire)
+                            .is_ok();
+                    let correction_applied = suppression_acquired
+                        && try_apply_fast_correction(sequence, foreground_window, boundary);
+
+                    if suppression_acquired && !correction_applied {
+                        BOUNDARY_SUPPRESSED
+                            .compare_exchange(data.vkCode, 0, Ordering::AcqRel, Ordering::Acquire)
+                            .ok();
+                    }
+
+                    if let Some(sender) = HOOK_SENDER.get() {
+                        let _ = sender.try_send(KeyEvent {
+                            vk_code: data.vkCode,
+                            scan_code: data.scanCode,
+                            pressed: true,
+                            kind: if correction_applied {
+                                KeyEventKind::BoundaryApplied
+                            } else {
+                                KeyEventKind::BoundaryObserved
+                            },
+                            foreground_window,
+                            sequence,
+                        });
+                    }
+
+                    if correction_applied {
                         return 1;
                     }
 
-                    if let Some(sender) = HOOK_SENDER.get()
-                        && sender
-                            .try_send(KeyEvent {
-                                vk_code: data.vkCode,
-                                scan_code: data.scanCode,
-                                pressed: true,
-                                kind: KeyEventKind::Boundary,
-                                foreground_window: unsafe { GetForegroundWindow() } as isize,
-                            })
-                            .is_ok()
-                    {
-                        return 1;
-                    }
-
-                    BOUNDARY_SUPPRESSED.store(0, Ordering::Release);
+                    return unsafe { CallNextHookEx(ptr::null_mut(), code, w_param, l_param) };
                 } else if released
                     && BOUNDARY_SUPPRESSED
                         .compare_exchange(data.vkCode, 0, Ordering::AcqRel, Ordering::Acquire)
@@ -1178,12 +1418,46 @@ unsafe extern "system" fn keyboard_hook(code: i32, w_param: WPARAM, l_param: LPA
                     pressed,
                     kind: KeyEventKind::Regular,
                     foreground_window: unsafe { GetForegroundWindow() } as isize,
+                    sequence,
                 });
             }
         }
     }
 
     unsafe { CallNextHookEx(ptr::null_mut(), code, w_param, l_param) }
+}
+
+unsafe extern "system" fn mouse_hook(code: i32, w_param: WPARAM, _l_param: LPARAM) -> LRESULT {
+    if code == HC_ACTION as i32
+        && matches!(
+            w_param as u32,
+            WM_LBUTTONDOWN
+                | WM_RBUTTONDOWN
+                | WM_MBUTTONDOWN
+                | WM_XBUTTONDOWN
+                | WM_MOUSEWHEEL
+                | WM_MOUSEHWHEEL
+        )
+    {
+        let sequence = KEYDOWN_SEQUENCE.fetch_add(1, Ordering::AcqRel) + 1;
+        if let Some(slot) = FAST_CORRECTION.get()
+            && let Ok(mut correction) = slot.try_lock()
+        {
+            *correction = None;
+        }
+        if let Some(sender) = HOOK_SENDER.get() {
+            let _ = sender.try_send(KeyEvent {
+                vk_code: 0,
+                scan_code: 0,
+                pressed: true,
+                kind: KeyEventKind::ContextReset,
+                foreground_window: unsafe { GetForegroundWindow() } as isize,
+                sequence,
+            });
+        }
+    }
+
+    unsafe { CallNextHookEx(ptr::null_mut(), code, w_param, _l_param) }
 }
 
 fn translate_key(event: KeyEvent, modifiers: Modifiers) -> Option<char> {
@@ -1251,6 +1525,12 @@ fn plain_boundary_pressed() -> bool {
     .any(|key| unsafe { GetAsyncKeyState(i32::from(key)) } < 0)
 }
 
+fn shift_pressed() -> bool {
+    [VK_SHIFT, VK_LSHIFT, VK_RSHIFT]
+        .into_iter()
+        .any(|key| unsafe { GetAsyncKeyState(i32::from(key)) } < 0)
+}
+
 fn plain_navigation_pressed() -> bool {
     ![
         VK_SHIFT,
@@ -1310,6 +1590,111 @@ fn send_replacement(erase_count: usize, replacement: &str) -> io::Result<()> {
 
     let inputs = replacement_inputs(erase_count, replacement);
     send_inputs(&inputs)
+}
+
+fn clear_fast_correction() {
+    if let Ok(mut correction) = FAST_CORRECTION.get_or_init(|| Mutex::new(None)).lock() {
+        *correction = None;
+    }
+}
+
+fn try_apply_fast_correction(
+    boundary_sequence: u64,
+    foreground_window: isize,
+    boundary: KeyStroke,
+) -> bool {
+    if !FAST_CORRECTION_CONTEXT_SAFE.load(Ordering::Acquire) {
+        return false;
+    }
+    let Some(slot) = FAST_CORRECTION.get() else {
+        return false;
+    };
+    let Ok(correction) = slot.try_lock() else {
+        return false;
+    };
+    let Some(correction) = correction.as_ref() else {
+        return false;
+    };
+    if correction.sequence.wrapping_add(1) != boundary_sequence
+        || correction.window != foreground_window
+        || unsafe { GetForegroundWindow() } as isize != foreground_window
+    {
+        return false;
+    }
+
+    let Some(replacement) = correction.correction.as_ref() else {
+        return false;
+    };
+    let inputs = replacement_with_boundary_inputs(
+        correction.trigger.chars().count(),
+        &replacement.replacement,
+        boundary,
+    );
+    match send_inputs(&inputs) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(%error, "failed to apply prepared autocorrection");
+            false
+        }
+    }
+}
+
+fn try_apply_fast_tab(
+    tab_sequence: u64,
+    foreground_window: isize,
+    tab: KeyStroke,
+) -> FastTabAction {
+    if !FAST_CORRECTION_CONTEXT_SAFE.load(Ordering::Acquire) {
+        return FastTabAction::Fallback;
+    }
+    let Some(slot) = FAST_CORRECTION.get() else {
+        return FastTabAction::Fallback;
+    };
+    let Ok(decision) = slot.try_lock() else {
+        return FastTabAction::Fallback;
+    };
+    let Some(decision) = decision.as_ref() else {
+        return FastTabAction::Fallback;
+    };
+    if decision.sequence.wrapping_add(1) != tab_sequence
+        || decision.window != foreground_window
+        || unsafe { GetForegroundWindow() } as isize != foreground_window
+    {
+        return FastTabAction::Fallback;
+    }
+
+    let send_result = if let Some(snippet) = decision.snippet.as_deref() {
+        if requires_clipboard_paste(snippet)
+            || snippet.encode_utf16().count() > DIRECT_INPUT_UTF16_LIMIT
+        {
+            return FastTabAction::Fallback;
+        }
+        send_inputs(&replacement_inputs(
+            decision.trigger.chars().count(),
+            snippet,
+        ))
+        .map(|()| KeyEventKind::TabSnippetApplied)
+    } else if let Some(completion) = decision.completion.as_ref() {
+        send_inputs(&replacement_inputs(0, &completion.suffix))
+            .map(|()| KeyEventKind::TabCompletionApplied)
+    } else if let Some(correction) = decision.correction.as_ref() {
+        send_inputs(&replacement_with_boundary_inputs(
+            decision.trigger.chars().count(),
+            &correction.replacement,
+            tab,
+        ))
+        .map(|()| KeyEventKind::TabCorrectionApplied)
+    } else {
+        return FastTabAction::PassThrough;
+    };
+
+    match send_result {
+        Ok(kind) => FastTabAction::Applied(kind),
+        Err(error) => {
+            tracing::warn!(%error, "failed to apply prepared Tab action");
+            FastTabAction::PassThrough
+        }
+    }
 }
 
 fn send_clipboard_replacement(erase_count: usize, replacement: &str) -> io::Result<()> {
@@ -1517,9 +1902,14 @@ fn replay_key(key: KeyStroke) {
 
 fn replay_suppressed_event(event: KeyEvent) {
     match event.kind {
-        KeyEventKind::Regular => {}
+        KeyEventKind::Regular
+        | KeyEventKind::TabSnippetApplied
+        | KeyEventKind::TabCompletionApplied
+        | KeyEventKind::TabCorrectionApplied
+        | KeyEventKind::ContextReset => {}
         KeyEventKind::Tab => replay_tab(),
-        KeyEventKind::Boundary
+        KeyEventKind::BoundaryObserved
+        | KeyEventKind::BoundaryApplied
         | KeyEventKind::Undo
         | KeyEventKind::QuickSearch
         | KeyEventKind::AutocompletePrevious
@@ -1583,6 +1973,25 @@ fn replacement_inputs(erase_count: usize, replacement: &str) -> Vec<INPUT> {
         inputs.push(key_input(0, unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
     }
 
+    inputs
+}
+
+fn replacement_with_boundary_inputs(
+    erase_count: usize,
+    replacement: &str,
+    boundary: KeyStroke,
+) -> Vec<INPUT> {
+    let mut inputs = replacement_inputs(erase_count, replacement);
+    inputs.push(key_input(
+        boundary.vk_code as u16,
+        boundary.scan_code as u16,
+        0,
+    ));
+    inputs.push(key_input(
+        boundary.vk_code as u16,
+        boundary.scan_code as u16,
+        KEYEVENTF_KEYUP,
+    ));
     inputs
 }
 
@@ -1650,6 +2059,11 @@ fn is_autocorrect_boundary_key(vk_code: u32) -> bool {
             | VK_OEM_COMMA
             | VK_OEM_PERIOD
     )
+}
+
+fn is_fast_autocorrect_boundary(vk_code: u32, translated: Option<char>) -> bool {
+    matches!(vk_code as u16, VK_SPACE | VK_RETURN)
+        || translated.is_some_and(|character| !is_tracked_word_character(character))
 }
 
 fn is_tracked_word_character(character: char) -> bool {
@@ -1740,12 +2154,13 @@ fn normalize_trigger(trigger: &str) -> String {
 #[cfg(test)]
 mod tests {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        INPUT, KEYEVENTF_KEYUP, VK_BACK, VK_CONTROL,
+        INPUT, KEYEVENTF_KEYUP, VK_BACK, VK_CONTROL, VK_OEM_1, VK_SPACE,
     };
 
     use super::{
-        SnippetController, normalize_clipboard_text, paste_inputs, replacement_inputs,
-        requires_clipboard_paste,
+        KeyStroke, Modifiers, SnippetController, is_fast_autocorrect_boundary,
+        normalize_clipboard_text, paste_inputs, replacement_inputs,
+        replacement_with_boundary_inputs, requires_clipboard_paste,
     };
 
     fn keyboard_data(input: &INPUT) -> (u16, u16, u32) {
@@ -1764,10 +2179,53 @@ mod tests {
     }
 
     #[test]
+    fn resetting_modifiers_clears_a_stale_alt_key() {
+        let mut modifiers = Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+
+        assert!(modifiers.command_modifier_active());
+        modifiers.reset();
+
+        assert!(!modifiers.command_modifier_active());
+    }
+
+    #[test]
     fn replacement_contains_backspaces_and_unicode_pairs_without_delimiter() {
         let inputs = replacement_inputs(2, "Да");
 
         assert_eq!(inputs.len(), 8);
+    }
+
+    #[test]
+    fn fast_correction_batches_replacement_and_boundary_in_order() {
+        let inputs = replacement_with_boundary_inputs(
+            2,
+            "Да",
+            KeyStroke {
+                vk_code: u32::from(VK_SPACE),
+                scan_code: 57,
+            },
+        );
+
+        assert_eq!(inputs.len(), 10);
+        assert_eq!(keyboard_data(&inputs[0]), (VK_BACK, 0, 0));
+        assert_eq!(keyboard_data(&inputs[inputs.len() - 2]), (VK_SPACE, 57, 0));
+        assert_eq!(
+            keyboard_data(&inputs[inputs.len() - 1]),
+            (VK_SPACE, 57, KEYEVENTF_KEYUP)
+        );
+    }
+
+    #[test]
+    fn russian_oem_letters_are_not_treated_as_punctuation_boundaries() {
+        assert!(!is_fast_autocorrect_boundary(
+            u32::from(VK_OEM_1),
+            Some('ж')
+        ));
+        assert!(is_fast_autocorrect_boundary(u32::from(VK_OEM_1), Some(';')));
+        assert!(is_fast_autocorrect_boundary(u32::from(VK_SPACE), Some(' ')));
     }
 
     #[test]

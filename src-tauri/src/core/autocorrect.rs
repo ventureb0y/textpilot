@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Correction {
     pub original: String,
@@ -6,7 +8,14 @@ pub struct Correction {
 
 #[derive(Debug, Clone, Default)]
 pub struct AutocorrectIndex {
-    words: Vec<String>,
+    exact_words: HashSet<String>,
+    words_by_length: HashMap<usize, Vec<IndexedWord>>,
+}
+
+#[derive(Debug, Clone)]
+struct IndexedWord {
+    word: String,
+    characters: Vec<char>,
 }
 
 impl AutocorrectIndex {
@@ -19,7 +28,21 @@ impl AutocorrectIndex {
     pub fn replace(&mut self, mut words: Vec<String>) {
         words.sort_by_key(|word| word.to_lowercase());
         words.dedup_by(|left, right| left.to_lowercase() == right.to_lowercase());
-        self.words = words;
+
+        let mut exact_words = HashSet::with_capacity(words.len());
+        let mut words_by_length = HashMap::<usize, Vec<IndexedWord>>::new();
+        for word in words {
+            let normalized = word.to_lowercase();
+            let characters = normalized.chars().collect::<Vec<_>>();
+            exact_words.insert(normalized);
+            words_by_length
+                .entry(characters.len())
+                .or_default()
+                .push(IndexedWord { word, characters });
+        }
+
+        self.exact_words = exact_words;
+        self.words_by_length = words_by_length;
     }
 
     pub fn correction_for(&self, word: &str) -> Option<Correction> {
@@ -29,42 +52,49 @@ impl AutocorrectIndex {
             return None;
         }
 
-        if self
-            .words
-            .iter()
-            .any(|candidate| candidate.to_lowercase() == normalized)
-        {
+        if self.exact_words.contains(&normalized) {
             return None;
         }
 
         let max_distance = if length <= 7 { 1 } else { 2 };
         let mut nearest: Option<(&str, usize)> = None;
         let mut ambiguous = false;
+        let characters = normalized.chars().collect::<Vec<_>>();
+        let largest_candidate_length = length.saturating_add(max_distance);
+        let columns = largest_candidate_length + 1;
+        let mut distances = vec![0usize; (length + 1) * columns];
 
-        for candidate in &self.words {
-            let candidate_normalized = candidate.to_lowercase();
-            if candidate_normalized.chars().count().abs_diff(length) > max_distance {
+        for candidate_length in length.saturating_sub(max_distance)..=largest_candidate_length {
+            let Some(candidates) = self.words_by_length.get(&candidate_length) else {
                 continue;
-            }
+            };
 
-            let distance = damerau_levenshtein(&normalized, &candidate_normalized);
-            if distance > max_distance {
-                continue;
-            }
+            for candidate in candidates {
+                let distance = bounded_damerau_levenshtein(
+                    &characters,
+                    &candidate.characters,
+                    max_distance,
+                    columns,
+                    &mut distances,
+                );
+                if distance > max_distance {
+                    continue;
+                }
 
-            match nearest {
-                None => {
-                    nearest = Some((candidate, distance));
-                    ambiguous = false;
+                match nearest {
+                    None => {
+                        nearest = Some((&candidate.word, distance));
+                        ambiguous = false;
+                    }
+                    Some((_, nearest_distance)) if distance < nearest_distance => {
+                        nearest = Some((&candidate.word, distance));
+                        ambiguous = false;
+                    }
+                    Some((_, nearest_distance)) if distance == nearest_distance => {
+                        ambiguous = true;
+                    }
+                    _ => {}
                 }
-                Some((_, nearest_distance)) if distance < nearest_distance => {
-                    nearest = Some((candidate, distance));
-                    ambiguous = false;
-                }
-                Some((_, nearest_distance)) if distance == nearest_distance => {
-                    ambiguous = true;
-                }
-                _ => {}
             }
         }
 
@@ -115,21 +145,28 @@ fn match_case(original: &str, replacement: &str) -> String {
     replacement.to_owned()
 }
 
-fn damerau_levenshtein(left: &str, right: &str) -> usize {
-    let left = left.chars().collect::<Vec<_>>();
-    let right = right.chars().collect::<Vec<_>>();
-    let columns = right.len() + 1;
-    let mut distances = vec![0usize; (left.len() + 1) * columns];
+fn bounded_damerau_levenshtein(
+    left: &[char],
+    right: &[char],
+    max_distance: usize,
+    columns: usize,
+    distances: &mut [usize],
+) -> usize {
+    let unreachable = max_distance + 1;
+    distances.fill(unreachable);
+    distances[0] = 0;
 
-    for row in 0..=left.len() {
+    for row in 1..=left.len().min(max_distance) {
         distances[row * columns] = row;
     }
-    for column in 0..=right.len() {
+    for column in 1..=right.len().min(max_distance) {
         distances[column] = column;
     }
 
     for row in 1..=left.len() {
-        for column in 1..=right.len() {
+        let first_column = row.saturating_sub(max_distance).max(1);
+        let last_column = right.len().min(row + max_distance);
+        for column in first_column..=last_column {
             let substitution_cost = usize::from(left[row - 1] != right[column - 1]);
             let mut distance = (distances[(row - 1) * columns + column] + 1)
                 .min(distances[row * columns + column - 1] + 1)
@@ -143,7 +180,7 @@ fn damerau_levenshtein(left: &str, right: &str) -> usize {
                 distance = distance.min(distances[(row - 2) * columns + column - 2] + 1);
             }
 
-            distances[row * columns + column] = distance;
+            distances[row * columns + column] = distance.min(unreachable);
         }
     }
 
@@ -180,5 +217,29 @@ mod tests {
         assert!(index.correction_for("кот").is_none());
         assert!(index.correction_for("согласование").is_none());
         assert!(index.correction_for("мотик").is_none());
+    }
+
+    #[test]
+    fn corrects_insertion_deletion_and_two_long_word_errors() {
+        let index = AutocorrectIndex::new(vec!["привет".into(), "производительность".into()]);
+
+        assert_eq!(
+            index
+                .correction_for("привт")
+                .map(|correction| correction.replacement),
+            Some("привет".into())
+        );
+        assert_eq!(
+            index
+                .correction_for("привеет")
+                .map(|correction| correction.replacement),
+            Some("привет".into())
+        );
+        assert_eq!(
+            index
+                .correction_for("прозводительност")
+                .map(|correction| correction.replacement),
+            Some("производительность".into())
+        );
     }
 }

@@ -4,7 +4,7 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
-use rusqlite::{Connection, Result, params};
+use rusqlite::{Connection, OptionalExtension, Result, params};
 use serde::{Deserialize, Serialize};
 
 use crate::core::{autocomplete::AutocompleteEntry, snippets::is_valid_trigger};
@@ -19,6 +19,8 @@ pub use transfer::{
 const INITIAL_SCHEMA: &str = include_str!("schema.sql");
 const INTEGRITY_TRIGGERS: &str = include_str!("integrity_triggers.sql");
 const CURRENT_SCHEMA_VERSION: u32 = 5;
+const DICTIONARY_AUTOCOMPLETE_ENABLED_SETTING: &str = "dictionary_autocomplete_enabled";
+const QUICK_SEARCH_ENABLED_SETTING: &str = "quick_search_enabled";
 
 pub struct Database {
     connection: Mutex<Connection>,
@@ -164,6 +166,62 @@ impl Database {
     pub fn profile_count(&self) -> Result<u32> {
         self.lock()?
             .query_row("SELECT COUNT(*) FROM profiles", [], |row| row.get(0))
+    }
+
+    pub fn quick_search_enabled(&self) -> Result<bool> {
+        let value = self
+            .lock()?
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                [QUICK_SEARCH_ENABLED_SETTING],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+
+        Ok(!matches!(value.as_deref(), Some("false" | "0")))
+    }
+
+    pub fn dictionary_autocomplete_enabled(&self) -> Result<bool> {
+        let value = self
+            .lock()?
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                [DICTIONARY_AUTOCOMPLETE_ENABLED_SETTING],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+
+        Ok(!matches!(value.as_deref(), Some("false" | "0")))
+    }
+
+    pub fn set_quick_search_enabled(&self, enabled: bool) -> Result<()> {
+        self.lock()?.execute(
+            "INSERT INTO settings (key, value, updated_at)
+             VALUES (?1, ?2, CURRENT_TIMESTAMP)
+             ON CONFLICT(key) DO UPDATE SET
+                 value = excluded.value,
+                 updated_at = CURRENT_TIMESTAMP",
+            params![
+                QUICK_SEARCH_ENABLED_SETTING,
+                if enabled { "true" } else { "false" }
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_dictionary_autocomplete_enabled(&self, enabled: bool) -> Result<()> {
+        self.lock()?.execute(
+            "INSERT INTO settings (key, value, updated_at)
+             VALUES (?1, ?2, CURRENT_TIMESTAMP)
+             ON CONFLICT(key) DO UPDATE SET
+                 value = excluded.value,
+                 updated_at = CURRENT_TIMESTAMP",
+            params![
+                DICTIONARY_AUTOCOMPLETE_ENABLED_SETTING,
+                if enabled { "true" } else { "false" }
+            ],
+        )?;
+        Ok(())
     }
 
     pub fn dashboard_data(&self) -> Result<DashboardData> {
@@ -1255,6 +1313,32 @@ mod tests {
         let database = Database::open(":memory:").expect("database should open");
 
         assert_eq!(database.profile_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn quick_search_is_enabled_by_default_and_can_be_persisted() {
+        let database = Database::open(":memory:").expect("database should open");
+
+        assert!(database.quick_search_enabled().unwrap());
+
+        database.set_quick_search_enabled(false).unwrap();
+        assert!(!database.quick_search_enabled().unwrap());
+
+        database.set_quick_search_enabled(true).unwrap();
+        assert!(database.quick_search_enabled().unwrap());
+    }
+
+    #[test]
+    fn dictionary_autocomplete_is_enabled_by_default_and_can_be_persisted() {
+        let database = Database::open(":memory:").expect("database should open");
+
+        assert!(database.dictionary_autocomplete_enabled().unwrap());
+
+        database.set_dictionary_autocomplete_enabled(false).unwrap();
+        assert!(!database.dictionary_autocomplete_enabled().unwrap());
+
+        database.set_dictionary_autocomplete_enabled(true).unwrap();
+        assert!(database.dictionary_autocomplete_enabled().unwrap());
     }
 
     #[test]

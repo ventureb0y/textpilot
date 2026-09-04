@@ -58,6 +58,8 @@
     dictionaryCount: 146,
     isPaused: false,
     engineAvailable: true,
+    dictionaryAutocompleteEnabled: true,
+    quickSearchEnabled: true,
     categories: [
       { id: 1, parentId: null, name: "Продажи", path: "Продажи", phraseCount: 2, wordCount: 3 },
       { id: 2, parentId: null, name: "Поддержка", path: "Поддержка", phraseCount: 1, wordCount: 1 },
@@ -182,6 +184,10 @@
   let backupsLoading = false;
   let profileSnapshots: ProfileSnapshotSummary[] = [];
   let profileSnapshotsLoading = false;
+  let dictionaryAutocompleteSaving = false;
+  let dictionaryAutocompleteError = "";
+  let quickSearchSaving = false;
+  let quickSearchError = "";
   let confirmation: ConfirmationState | null = null;
 
   let categoryName = "";
@@ -320,6 +326,40 @@
       data = data ? { ...data, isPaused: paused } : data;
     } catch (cause) {
       error = String(cause);
+    }
+  }
+
+  async function toggleQuickSearch() {
+    if (!data) return;
+
+    quickSearchSaving = true;
+    quickSearchError = "";
+    try {
+      const enabled = await invoke<boolean>("set_quick_search_enabled", {
+        enabled: !data.quickSearchEnabled,
+      });
+      data = { ...data, quickSearchEnabled: enabled };
+    } catch (cause) {
+      quickSearchError = `Не удалось изменить настройку: ${String(cause)}`;
+    } finally {
+      quickSearchSaving = false;
+    }
+  }
+
+  async function toggleDictionaryAutocomplete() {
+    if (!data) return;
+
+    dictionaryAutocompleteSaving = true;
+    dictionaryAutocompleteError = "";
+    try {
+      const enabled = await invoke<boolean>("set_dictionary_autocomplete_enabled", {
+        enabled: !data.dictionaryAutocompleteEnabled,
+      });
+      data = { ...data, dictionaryAutocompleteEnabled: enabled };
+    } catch (cause) {
+      dictionaryAutocompleteError = "Не удалось изменить настройку: " + String(cause);
+    } finally {
+      dictionaryAutocompleteSaving = false;
     }
   }
 
@@ -1840,8 +1880,8 @@
             <span class="page-kicker">Конфигурация</span>
             <h1>Настройки</h1>
             <p>
-              Переносите профили между компьютерами через локальные JSON-файлы.
-              Перед каждым импортом TextPilot создаёт backup базы.
+              Управляйте горячими клавишами и переносите профили через локальные JSON-файлы.
+              Все настройки хранятся только на этом компьютере.
             </p>
           </div>
         </div>
@@ -1854,6 +1894,72 @@
         {/if}
 
         <div class="settings-grid">
+          <section class="settings-card hotkey-settings-card">
+            <div class="settings-card-icon"><Icon name="book" size={21} /></div>
+            <div class="settings-card-copy">
+              <span class="page-kicker">Производительность</span>
+              <h2>Подсказки из словаря</h2>
+              <p>
+                Ищет варианты в пользовательском словаре после каждого введённого символа.
+                Отключите на слабых компьютерах — сниппеты и автокоррекция продолжат работать.
+              </p>
+            </div>
+            <div class="hotkey-setting-row">
+              <span class="hotkey-setting-copy dictionary-setting-copy">
+                <strong>Подсказки при вводе</strong>
+                <small>{data?.dictionaryAutocompleteEnabled ? "Включены" : "Выключены"}</small>
+              </span>
+              <button
+                type="button"
+                class:enabled={data?.dictionaryAutocompleteEnabled ?? true}
+                class="setting-switch"
+                role="switch"
+                aria-checked={data?.dictionaryAutocompleteEnabled ?? true}
+                aria-label="Подсказки из пользовательского словаря"
+                onclick={toggleDictionaryAutocomplete}
+                disabled={dictionaryAutocompleteSaving || !data}
+              >
+                <span></span>
+              </button>
+            </div>
+            {#if dictionaryAutocompleteError}
+              <p class="page-error hotkey-setting-error">{dictionaryAutocompleteError}</p>
+            {/if}
+          </section>
+
+          <section class="settings-card hotkey-settings-card">
+            <div class="settings-card-icon"><Icon name="search" size={21} /></div>
+            <div class="settings-card-copy">
+              <span class="page-kicker">Горячие клавиши</span>
+              <h2>Быстрый поиск</h2>
+              <p>
+                Открывает поиск по фразам и словарю из любого приложения. Когда функция
+                выключена, сочетание остаётся доступным Windows и другим программам.
+              </p>
+            </div>
+            <div class="hotkey-setting-row">
+              <span class="hotkey-setting-copy">
+                <kbd>Alt</kbd><span>+</span><kbd>Space</kbd>
+                <small>{data?.quickSearchEnabled ? "Включено" : "Выключено"}</small>
+              </span>
+              <button
+                type="button"
+                class:enabled={data?.quickSearchEnabled ?? true}
+                class="setting-switch"
+                role="switch"
+                aria-checked={data?.quickSearchEnabled ?? true}
+                aria-label="Быстрый поиск по Alt + Space"
+                onclick={toggleQuickSearch}
+                disabled={quickSearchSaving || !data}
+              >
+                <span></span>
+              </button>
+            </div>
+            {#if quickSearchError}
+              <p class="page-error hotkey-setting-error">{quickSearchError}</p>
+            {/if}
+          </section>
+
           <section class="settings-card">
             <div class="settings-card-icon"><Icon name="download" size={21} /></div>
             <div class="settings-card-copy">

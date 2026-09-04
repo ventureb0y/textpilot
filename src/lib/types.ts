@@ -45,6 +45,8 @@ export type DashboardData = {
   dictionaryCount: number;
   isPaused: boolean;
   engineAvailable: boolean;
+  dictionaryAutocompleteEnabled: boolean;
+  quickSearchEnabled: boolean;
 };
 
 export type ExportResult = {

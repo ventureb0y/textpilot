@@ -59,6 +59,8 @@ struct DashboardResponse {
     data: DashboardData,
     is_paused: bool,
     engine_available: bool,
+    dictionary_autocomplete_enabled: bool,
+    quick_search_enabled: bool,
 }
 
 #[tauri::command]
@@ -81,6 +83,14 @@ fn dashboard_data(state: State<'_, AppState>) -> Result<DashboardResponse, Strin
         .database
         .dashboard_data()
         .map_err(|error| error.to_string())?;
+    let quick_search_enabled = state
+        .database
+        .quick_search_enabled()
+        .map_err(|error| error.to_string())?;
+    let dictionary_autocomplete_enabled = state
+        .database
+        .dictionary_autocomplete_enabled()
+        .map_err(|error| error.to_string())?;
 
     #[cfg(target_os = "windows")]
     {
@@ -88,6 +98,8 @@ fn dashboard_data(state: State<'_, AppState>) -> Result<DashboardResponse, Strin
             data,
             is_paused: state.snippets.is_paused(),
             engine_available: state.input_monitor.is_some(),
+            dictionary_autocomplete_enabled,
+            quick_search_enabled,
         })
     }
 
@@ -97,6 +109,8 @@ fn dashboard_data(state: State<'_, AppState>) -> Result<DashboardResponse, Strin
             data,
             is_paused: true,
             engine_available: false,
+            dictionary_autocomplete_enabled,
+            quick_search_enabled,
         })
     }
 }
@@ -374,6 +388,40 @@ fn set_paused(state: State<'_, AppState>, paused: bool) -> Result<bool, String> 
 }
 
 #[tauri::command]
+fn set_quick_search_enabled(state: State<'_, AppState>, enabled: bool) -> Result<bool, String> {
+    state
+        .database
+        .set_quick_search_enabled(enabled)
+        .map_err(|error| error.to_string())?;
+
+    #[cfg(target_os = "windows")]
+    {
+        windows::set_quick_search_enabled(enabled);
+        if !enabled {
+            state.quick_search.hide();
+        }
+    }
+
+    Ok(enabled)
+}
+
+#[tauri::command]
+fn set_dictionary_autocomplete_enabled(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<bool, String> {
+    state
+        .database
+        .set_dictionary_autocomplete_enabled(enabled)
+        .map_err(|error| error.to_string())?;
+
+    #[cfg(target_os = "windows")]
+    state.autocomplete.set_enabled(enabled);
+
+    Ok(enabled)
+}
+
+#[tauri::command]
 fn autocomplete_suggestion(state: State<'_, AppState>) -> Option<AutocompleteSuggestion> {
     #[cfg(target_os = "windows")]
     {
@@ -467,7 +515,21 @@ fn refresh_input_indexes(state: &AppState) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
         state.snippets.replace_snippets(snippets);
         state.autocomplete.replace_words(autocomplete_words);
+        state.autocomplete.set_enabled(
+            state
+                .database
+                .dictionary_autocomplete_enabled()
+                .map_err(|error| error.to_string())?,
+        );
         state.autocorrect.replace_words(autocorrect_words);
+        let quick_search_enabled = state
+            .database
+            .quick_search_enabled()
+            .map_err(|error| error.to_string())?;
+        windows::set_quick_search_enabled(quick_search_enabled);
+        if !quick_search_enabled {
+            state.quick_search.hide();
+        }
     }
 
     Ok(())
@@ -500,12 +562,14 @@ pub fn run() {
 
             #[cfg(target_os = "windows")]
             {
+                windows::set_quick_search_enabled(database.quick_search_enabled()?);
                 let (tray, tray_menu) = TrayController::create(app)?;
                 let snippets = SnippetController::new(database.active_snippets()?);
                 let autocomplete_overlay = AutocompleteOverlay::create(app)?;
                 let overlay = autocomplete_overlay.clone();
                 let autocomplete = AutocompleteController::new(
                     database.active_autocomplete_words()?,
+                    database.dictionary_autocomplete_enabled()?,
                     move |suggestion| match suggestion {
                         Some(suggestion) => overlay.present(
                             AutocompleteSuggestion {
@@ -594,6 +658,8 @@ pub fn run() {
             list_profile_snapshots,
             restore_profile_snapshot,
             set_paused,
+            set_dictionary_autocomplete_enabled,
+            set_quick_search_enabled,
             autocomplete_suggestion,
             select_autocomplete,
             accept_autocomplete,
