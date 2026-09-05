@@ -1,7 +1,9 @@
 # Обновления TextPilot
 
 TextPilot использует официальный Tauri Updater. Метаданные публикуются через
-GitVerse Pages, а NSIS-установщик хранится в GitVerse Releases.
+GitVerse Pages, а ZIP с NSIS-установщиком хранится в GitVerse Releases.
+GitVerse не принимает `.exe` и `.sig` как ассеты: публикуется только ZIP.
+Tauri Updater проверяет подпись ZIP, извлекает установщик и запускает его.
 
 ## Первый подписанный выпуск
 
@@ -39,21 +41,32 @@ GitVerse Pages, а NSIS-установщик хранится в GitVerse Releas
 ```
 
 Скрипт запросит пароль ключа без отображения ввода, выполнит проверки, соберет
-NSIS и убедится, что рядом с установщиком создан файл `.sig`.
+NSIS, упакует его в ZIP и подпишет архив. Подпись `.exe.sig` не подходит
+для ZIP: в манифест нужно передавать содержимое `.exe.zip.sig`.
+
+Если установщик уже собран, пересборка не нужна:
+
+```powershell
+./scripts/package-update.ps1
+```
+
+Скрипт запросит пароль локально. ZIP содержит только установщик в корне.
+Существующий ZIP сохраняется, его содержимое сверяется с установщиком.
+Если сборка изменилась, нужно выпустить новую версию.
 
 ## Публикация первого релиза
 
 1. Создать и отправить тег `v0.0.5`.
 2. Создать публичный GitVerse Release для этого тега.
-3. Загрузить установщик `.exe` и соответствующий файл `.exe.sig`.
-4. Скопировать `browser_download_url` установщика.
+3. Загрузить `TextPilot_0.0.5_x64-setup.exe.zip`. Файл подписи загружать не нужно.
+4. Скопировать публичную ссылку скачивания ZIP и проверить доступ без авторизации.
 5. Сгенерировать манифест:
 
 ```powershell
 ./scripts/generate-update-manifest.ps1 `
   -Version 0.0.5 `
   -InstallerUrl "https://api.gitverse.ru/repos/ventureb0y/textpilot/releases/RELEASE_ID/assets/ASSET_ID/download" `
-  -SignaturePath "src-tauri/target/release/bundle/nsis/TextPilot_0.0.5_x64-setup.exe.sig" `
+  -SignaturePath "src-tauri/target/release/bundle/nsis/TextPilot_0.0.5_x64-setup.exe.zip.sig" `
   -Notes "Первый выпуск TextPilot со встроенными обновлениями."
 ```
 
@@ -66,5 +79,5 @@ NSIS и убедится, что рядом с установщиком созд
 https://ventureb0y.gitverse.site/textpilot/latest.json
 ```
 
-Манифест публикуется только после того, как установщик доступен по публичной
+Манифест публикуется только после того, как ZIP доступен по публичной
 ссылке. Приватный ключ и его пароль никогда не добавляются в Git.

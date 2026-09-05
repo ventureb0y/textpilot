@@ -51,6 +51,8 @@ try {
         throw "Подпись обновления не создана: $signaturePath."
     }
 
+    & (Join-Path $PSScriptRoot "package-update.ps1") -PrivateKeyPath $resolvedKeyPath
+
     Write-Host ""
     Write-Host "Подписанная сборка готова:"
     Write-Host "  Установщик: $($installer.FullName)"
