@@ -2,6 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { onMount, tick } from "svelte";
+  import projectIcon from "../src-tauri/icons/128x128.png";
 
   type SearchItem = {
     id: number;
@@ -100,7 +101,7 @@
 
 <main class="search-shell">
   <header>
-    <div class="brand-mark">T</div>
+    <img class="project-icon" src={projectIcon} alt="" width="34" height="34" />
     <div>
       <strong>Быстрый поиск</strong>
       <span>Фразы и слова активного профиля</span>

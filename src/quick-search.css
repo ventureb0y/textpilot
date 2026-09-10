@@ -249,3 +249,5 @@ kbd {
 
 .search-shell:has(.insertion-error) { grid-template-rows: auto auto minmax(0, 1fr) auto auto; }
 .insertion-error { margin: 0; padding: 8px 16px; font-size: 12px; color: #ffc1b9; overflow-wrap: anywhere; }
+
+.project-icon { display: block; flex-shrink: 0; border-radius: 8px; object-fit: contain; }

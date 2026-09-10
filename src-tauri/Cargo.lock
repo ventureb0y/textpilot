@@ -3702,7 +3702,7 @@ dependencies = [
 
 [[package]]
 name = "textpilot"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "rusqlite",
  "serde",

@@ -972,52 +972,6 @@ select {
   background: #eef7f1;
 }
 
-.dictionary-meta {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 5px 10px;
-  min-width: 0;
-  color: #89938d;
-  font-size: var(--text-secondary);
-}
-
-.dictionary-meta button {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 0;
-  color: #929b95;
-  font: inherit;
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-}
-
-.dictionary-meta button::before {
-  width: 5px;
-  height: 5px;
-  content: "";
-  border-radius: 50%;
-  background: #c8ceca;
-}
-
-.dictionary-meta button.enabled {
-  color: #3f8059;
-}
-
-.dictionary-meta button.enabled::before {
-  background: #4dbb78;
-}
-
-.dictionary-meta button:hover:not(:disabled) {
-  color: #2f6f49;
-}
-
-.dictionary-meta button:disabled {
-  cursor: default;
-}
-
 .dictionary-actions {
   position: relative;
   display: flex;
@@ -2309,14 +2263,6 @@ code {
 .dictionary-card.disabled { opacity: 1; background: #f5f6f3; }
 .dictionary-card.disabled .dictionary-heading { color: #68746c; }
 .dictionary-category { overflow-wrap: anywhere; }
-.dictionary-meta { display: grid; grid-template-columns: 90px 140px 138px; gap: 6px; }
-.dictionary-meta button {
-  min-height: 34px; padding: 6px; border: 1px solid #c7cfc9; border-radius: 6px;
-  color: #5c685f; background: #f4f5f2; font-size: var(--text-secondary);
-}
-.dictionary-meta button::before { content: "− "; }
-.dictionary-meta button.enabled { color: #225c3d; border-color: #9abaA6; background: #e9f4eb; }
-.dictionary-meta button.enabled::before { content: "✓ "; }
 .dictionary-actions { grid-column: 3; align-self: start; }
 .action-menu { position: relative; }
 .action-menu-panel {
@@ -2358,7 +2304,6 @@ code {
   .dictionary-card { grid-template-columns: minmax(0, 1fr) 36px; }
   .dictionary-content { grid-column: 1; grid-row: 1; }
   .dictionary-actions { grid-column: 2; grid-row: 1; }
-  .dictionary-meta { grid-column: 1 / -1; grid-row: 2; grid-template-columns: 90px minmax(0, 1fr) minmax(0, 1fr); }
 }
 @media (max-width: 960px) {
   .dictionary-layout { grid-template-columns: 190px minmax(0, 1fr); }
@@ -2373,8 +2318,38 @@ code {
 .detail-body { min-height: 0; }
 .detail-title > div { min-width: 0; }
 .detail-header { letter-spacing: normal; text-transform: none; }
-.dictionary-meta button::before, .dictionary-meta button.enabled::before {
-  width: 12px; height: auto; flex: 0 0 12px; border-radius: 0; background: transparent; line-height: 1;
-}
 .dictionary-actions { opacity: 1; }
 .modal :is(input, textarea, button, summary):focus-visible { outline: 2px solid #328264; outline-offset: 2px; }
+
+/* Compact library rows and phrase preview. */
+.project-icon { display: block; flex-shrink: 0; object-fit: contain; border-radius: 8px; }
+.brand { gap: 9px; }
+.phrase-open { padding: 11px 13px; }
+.phrase-content { gap: 5px; }
+.phrase-heading { flex-wrap: nowrap; gap: 8px; min-width: 0; }
+.phrase-heading > strong { flex: 0 1 auto; }
+.phrase-heading > code { flex-shrink: 0; }
+.phrase-category { display: flex; min-width: 0; max-width: 38%; margin-left: auto; }
+.inactive-marker { display: inline-flex; flex-shrink: 0; align-items: center; color: #849188; }
+.detail-panel { grid-template-rows: 40px minmax(0, 1fr); }
+.detail-header { height: 40px; padding-inline: 12px; justify-content: flex-end; }
+.detail-body { padding: 14px 16px; }
+.detail-title { display: flex; align-items: flex-start; gap: 10px; padding: 0; margin-bottom: 14px; border: 0; }
+.detail-heading-copy { flex: 1; min-width: 0; }
+.detail-title h2 { margin: 1px 0 6px; font-size: var(--text-body); }
+.detail-meta { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.detail-meta > code { flex-shrink: 0; }
+.detail-actions { display: flex; flex: 0 0 auto; flex-wrap: nowrap; gap: 2px; margin: 0; }
+.detail-actions .icon-button { width: 30px; height: 30px; padding: 5px; }
+.detail-delete { color: #8d7777; }
+.detail-delete:hover { color: #a93434; background: #fff0f0; }
+.detail-description { margin: 12px 0 0; color: #65756b; font-size: var(--text-secondary); line-height: 1.5; overflow-wrap: anywhere; }
+.dictionary-card { grid-template-columns: minmax(0, 1fr) 32px; align-items: center; gap: 10px; padding: 10px 12px; }
+.dictionary-content { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.dictionary-heading { min-width: 0; flex: 0 1 auto; }
+.dictionary-category { display: flex; min-width: 0; max-width: 45%; margin-left: auto; }
+.dictionary-actions { grid-column: 2; grid-row: 1; align-self: center; }
+@media (max-width: 1199px) {
+  .detail-header { justify-content: flex-start; }
+  .dictionary-content { grid-column: 1; grid-row: 1; }
+}

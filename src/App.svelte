@@ -8,6 +8,8 @@
   import ActionMenu from "./lib/ActionMenu.svelte";
   import ConfirmDialog from "./lib/ConfirmDialog.svelte";
   import Icon from "./lib/Icon.svelte";
+  import CategoryLabel from "./lib/CategoryLabel.svelte";
+  import projectIcon from "../src-tauri/icons/128x128.png";
   import SelectControl from "./lib/SelectControl.svelte";
   import type {
     BackupSummary,
@@ -194,7 +196,7 @@
   let quickSearchSaving = false;
   let quickSearchError = "";
   let confirmation: ConfirmationState | null = null;
-  let currentAppVersion = "0.0.7";
+  let currentAppVersion = "0.0.8";
   let availableUpdate: Update | null = null;
   let updateModalOpen = false;
   let updateChecking = false;
@@ -1421,7 +1423,7 @@
 <div class="app-shell" class:is-paused={paused}>
   <aside class="primary-sidebar">
     <div class="brand" aria-label="TextPilot">
-      <span class="brand-mark"><Icon name="spark" size={19} strokeWidth={2.1} /></span>
+      <img class="project-icon" src={projectIcon} alt="" width="32" height="32" />
       <span>TextPilot</span>
     </div>
 
@@ -1695,14 +1697,14 @@
                     <span class="phrase-heading">
                       <strong>{phrase.title}</strong>
                       <code>{phrase.snippet}</code>
+                      {#if !phrase.isEnabled}
+                        <span class="inactive-marker" title="Фраза выключена" aria-label="Фраза выключена"><Icon name="pause" size={14} /></span>
+                      {/if}
+                      {#if phrase.categoryId !== null && phrase.categoryId !== selectedCategory}
+                        <span class="phrase-category"><CategoryLabel path={categoryNameById(phrase.categoryId)} /></span>
+                      {/if}
                     </span>
                     <span class="phrase-preview">{phrase.body}</span>
-                    <span class="phrase-meta">
-                      {#if phrase.categoryId !== selectedCategory && !(phrase.categoryId === null && selectedCategory === "uncategorized")}
-                        <span>{categoryNameById(phrase.categoryId)}</span>
-                      {/if}
-                      {#if !phrase.isEnabled}<span class="enabled-label">Выключена</span>{/if}
-                    </span>
                   </span>
                   </button>
                   <ActionMenu label={`Действия с фразой «${phrase.title}»`} disabled={saving} items={[
@@ -1720,57 +1722,37 @@
           <aside class="detail-panel">
             <div class="detail-header">
               <button class="ghost-button detail-back" onclick={closePhraseView}>← Назад</button>
-              <span>Просмотр фразы</span>
               <button class="icon-button" onclick={closePhraseView} title="Закрыть">
                 <Icon name="close" size={18} />
               </button>
             </div>
             <div class="detail-body">
               <div class="detail-title">
-                <div>
+                <div class="detail-heading-copy">
                   <h2>{selectedPhrase.title}</h2>
-                  <code>{selectedPhrase.snippet}</code>
+                  <div class="detail-meta">
+                    <code>{selectedPhrase.snippet}</code>
+                    {#if selectedPhrase.categoryId !== null}
+                      <CategoryLabel path={categoryNameById(selectedPhrase.categoryId)} />
+                    {/if}
+                  </div>
+                </div>
+                <div class="detail-actions" role="group" aria-label="Действия с фразой">
+                  <button class="icon-button" title="Редактировать" aria-label="Редактировать" onclick={() => openEditPhraseModal(selectedPhrase)} disabled={saving}>
+                    <Icon name="edit" size={18} />
+                  </button>
+                  <button class="icon-button" title={selectedPhrase.isEnabled ? "Выключить" : "Включить"} aria-label={selectedPhrase.isEnabled ? "Выключить" : "Включить"} onclick={() => togglePhraseEnabled(selectedPhrase)} disabled={saving}>
+                    <Icon name={selectedPhrase.isEnabled ? "pause" : "play"} size={18} />
+                  </button>
+                  <button class="icon-button detail-delete" title="Удалить" aria-label="Удалить" onclick={() => deletePhrase(selectedPhrase)} disabled={saving}>
+                    <Icon name="trash" size={18} />
+                  </button>
                 </div>
               </div>
-              <div class="detail-actions">
-                <button
-                  class="secondary-button"
-                  onclick={() => openEditPhraseModal(selectedPhrase)}
-                  disabled={saving}
-                >
-                  Редактировать
-                </button>
-                <button
-                  class="ghost-button"
-                  onclick={() => togglePhraseEnabled(selectedPhrase)}
-                  disabled={saving}
-                >
-                  {selectedPhrase.isEnabled ? "Выключить" : "Включить"}
-                </button>
-                <button
-                  class="danger-button"
-                  onclick={() => deletePhrase(selectedPhrase)}
-                  disabled={saving}
-                >
-                  Удалить
-                </button>
-              </div>
-              {#if phraseActionError}
-                <p class="detail-error">{phraseActionError}</p>
-              {/if}
-              <div class="detail-section">
-                <span class="detail-label">Категория</span>
-                <p>{categoryNameById(selectedPhrase.categoryId)}</p>
-              </div>
-              <div class="detail-section">
-                <span class="detail-label">Текст фразы</span>
-                <div class="phrase-text">{selectedPhrase.body}</div>
-              </div>
+              {#if phraseActionError}<p class="detail-error" role="alert">{phraseActionError}</p>{/if}
+              <div class="phrase-text">{selectedPhrase.body}</div>
               {#if selectedPhrase.description}
-                <div class="detail-section">
-                  <span class="detail-label">Описание</span>
-                  <p>{selectedPhrase.description}</p>
-                </div>
+                <p class="detail-description">{selectedPhrase.description}</p>
               {/if}
             </div>
           </aside>
@@ -1890,50 +1872,19 @@
                   <div class="dictionary-content">
                     <div class="dictionary-heading">
                       <strong>{entry.word}</strong>
+                      {#if !entry.isEnabled}
+                        <span class="inactive-marker" title="Слово выключено" aria-label="Слово выключено"><Icon name="pause" size={14} /></span>
+                      {/if}
                     </div>
-
-                    <span class="dictionary-category">{categoryNameById(entry.categoryId)}</span>
+                    {#if entry.categoryId !== null && entry.categoryId !== selectedDictionaryCategory}
+                      <span class="dictionary-category"><CategoryLabel path={categoryNameById(entry.categoryId)} /></span>
+                    {/if}
                   </div>
-                    <div class="dictionary-meta">
-                      <button
-                        aria-label="Включено" aria-pressed={entry.isEnabled}
-                        class:enabled={entry.isEnabled}
-                        onclick={() =>
-                          updateDictionaryWord(entry, { isEnabled: !entry.isEnabled })}
-                        disabled={saving}
-                        title="Включить или отключить слово"
-                      >
-                        Включено
-                      </button>
-                      <button
-                        aria-label="Автодополнение" aria-pressed={entry.autocompleteEnabled}
-                        class:enabled={entry.autocompleteEnabled}
-                        onclick={() =>
-                          updateDictionaryWord(entry, {
-                            autocompleteEnabled: !entry.autocompleteEnabled,
-                          })}
-                        disabled={saving}
-                        title="Использовать для автодополнения"
-                      >
-                        Автодополнение
-                      </button>
-                      <button
-                        aria-label="Автокоррекция" aria-pressed={entry.autocorrectEnabled}
-                        class:enabled={entry.autocorrectEnabled}
-                        onclick={() =>
-                          updateDictionaryWord(entry, {
-                            autocorrectEnabled: !entry.autocorrectEnabled,
-                          })}
-                        disabled={saving}
-                        title="Использовать для автокоррекции"
-                      >
-                        Автокоррекция
-                      </button>
-                    </div>
 
                   <div class="dictionary-actions">
                     <ActionMenu label={`Действия со словом «${entry.word}»`} disabled={saving} items={[
                       { label: "Редактировать", action: () => openDictionaryModal(entry) },
+                      { label: entry.isEnabled ? "Выключить" : "Включить", action: () => updateDictionaryWord(entry, { isEnabled: !entry.isEnabled }) },
                       { label: "Удалить", action: () => deleteDictionaryWord(entry), danger: true },
                     ]} />
                   </div>
@@ -2032,7 +1983,7 @@
 
         <div class="settings-grid">
           <section class="settings-card update-settings-card">
-            <div class="settings-card-icon"><Icon name="spark" size={21} /></div>
+            <img class="project-icon" src={projectIcon} alt="" width="40" height="40" />
             <div class="settings-card-copy">
               <h2>TextPilot <span class="update-version-badge">v{currentAppVersion}</span></h2>
               <p>

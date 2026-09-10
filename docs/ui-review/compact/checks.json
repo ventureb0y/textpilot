@@ -1,0 +1,18 @@
+{
+  "passed": [
+    "Unchanged editor, initial focus and focus restoration",
+    "Dirty editor: backdrop, Escape, cancel, focus trap, discard",
+    "Edited values reverted to original close without confirmation",
+    "Saving guard and failure preserve editor values",
+    "Phrase menu: isolated action, keyboard navigation, outside click",
+    "Compact dictionary, editor settings and keyboard menu",
+    "Category and profile forms protect unsaved values",
+    "Narrow view restores filter, scroll and switches back on category change",
+    "Selected category metadata retains child category and disabled state",
+    "Data settings grouped, histories collapsed and scope explicit",
+    "Quick search: visible keyboard selection, empty Enter and insertion error",
+    "Layout matrix and browser pixel-density snapshots"
+  ],
+  "browserErrors": [],
+  "note": "Browser tests use mocked Tauri commands. DeviceScaleFactor is not a real Windows DPI test."
+}

@@ -7,7 +7,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const fixture = require('./fixtures/ui-dashboard.json');
-const output = path.resolve('docs/ui-review/after');
+const output = path.resolve(process.env.TEXTPILOT_UI_OUTPUT || 'docs/ui-review/after');
 fs.mkdirSync(output, { recursive: true });
 let browser;
 let currentPage;
@@ -81,7 +81,7 @@ async function run() {
   const p=await open();const trigger=p.getByRole('button',{name:'Новая фраза',exact:true});await trigger.click();
   await focused(p.getByLabel('Название',{exact:true}));
   await p.keyboard.press('Escape');assert.equal(await p.getByRole('dialog').count(),0);await focused(trigger);
-  await shot(p,'phrases');await p.context().close();
+  await p.waitForFunction(()=>{const img=document.querySelector('.brand img');return img?.complete && img.naturalWidth>0;});await shot(p,'phrases');await p.context().close();
  });
  await test('Dirty editor: backdrop, Escape, cancel, focus trap, discard',async()=>{
   const p=await open();await p.getByRole('button',{name:'Новая фраза',exact:true}).click();
@@ -117,9 +117,9 @@ async function run() {
   await trigger.click();await p.getByRole('menuitem',{name:'Редактировать'}).click();await focused(p.getByLabel('Название',{exact:true}));await p.keyboard.press('Escape');await focused(trigger);
   await trigger.click();await p.getByRole('menuitem',{name:'Редактировать'}).click();await p.getByLabel('Текст фразы',{exact:true}).fill('Обновлённый текст');await p.getByRole('button',{name:'Сохранить изменения',exact:true}).click();await p.getByRole('dialog').waitFor({state:'hidden'});await focused(trigger);await p.context().close();
  });
- await test('Dictionary switches, word editor and keyboard menu',async()=>{
+ await test('Compact dictionary, editor settings and keyboard menu',async()=>{
   const p=await open();await nav(p,'Словарь');await shot(p,'dictionary');
-  const card=p.locator('.dictionary-card').first();const toggle=card.getByRole('button',{name:'Автодополнение',exact:true});assert.equal(await toggle.getAttribute('aria-pressed'),'true');await toggle.click();await p.waitForFunction(()=>document.querySelector('.dictionary-meta button:nth-child(2)').getAttribute('aria-pressed')==='false');
+  const card=p.locator('.dictionary-card').first();assert.equal(await card.locator('.dictionary-meta').count(),0);assert.equal(await card.getByRole('button').count(),1);await card.getByRole('button',{name:/Действия со словом/}).click();await p.getByRole('menuitem',{name:'Редактировать'}).click();await p.getByRole('checkbox',{name:/Автодополнение/}).uncheck();await p.getByRole('button',{name:'Сохранить изменения',exact:true}).click();await p.getByRole('dialog').waitFor({state:'hidden'});assert.equal(await p.evaluate(()=>window.__uiTest.data.dictionaryWords[0].autocompleteEnabled),false);
   await card.getByRole('button',{name:/Действия со словом/}).click();await p.getByRole('menuitem',{name:'Редактировать'}).click();await p.getByLabel('Правильное слово').fill('согласование');await p.keyboard.press('Escape');await discard(p);
   await p.getByRole('button',{name:'Добавить слово',exact:true}).click();await p.keyboard.press('Escape');assert.equal(await p.getByRole('dialog').count(),0);await p.context().close();
  });
@@ -129,11 +129,11 @@ async function run() {
  });
  await test('Narrow view restores filter, scroll and switches back on category change',async()=>{
   const p=await open({long:true});await p.locator('.phrase-main').evaluate(el=>el.scrollTop=500);
-  const row=p.locator('.phrase-open').nth(6);await row.click();assert(!await p.locator('.phrase-main').isVisible());assert(await p.locator('.detail-panel').isVisible());await shot(p,'detail-1100');await p.getByRole('button',{name:'← Назад'}).click();assert(await p.locator('.phrase-main').isVisible());assert((await p.locator('.phrase-main').evaluate(el=>el.scrollTop))>0);
+  const row=p.locator('.phrase-open').nth(6);await row.click();assert(!await p.locator('.phrase-main').isVisible());assert(await p.locator('.detail-panel').isVisible());assert.equal(await p.locator('.detail-actions button').count(),3);assert.equal((await p.locator('.detail-actions').innerText()).trim(),'');await shot(p,'detail-1100');await p.getByRole('button',{name:'← Назад'}).click();assert(await p.locator('.phrase-main').isVisible());assert((await p.locator('.phrase-main').evaluate(el=>el.scrollTop))>0);
   await row.click();await p.getByRole('button',{name:'Без категории',exact:false}).first().click();assert.equal(await p.locator('.detail-panel').count(),0);await p.getByText('В этой категории пока нет фраз',{exact:true}).waitFor();await p.context().close();
  });
  await test('Selected category metadata retains child category and disabled state',async()=>{
-  const p=await open({long:true});await p.getByTitle('Продажи',{exact:true}).click();assert.equal(await p.locator('.phrase-meta').nth(0).innerText(),'Продажи/Очень длинная вложенная категория');assert.equal(await p.locator('.phrase-meta').nth(1).innerText(),'Выключена');await p.context().close();
+  const p=await open({long:true});await p.locator('.category-sidebar').getByTitle('Продажи',{exact:true}).click();const category=p.locator('.phrase-category').first();assert.equal(await category.innerText(),'Очень длинная вложенная категория');assert.equal(await category.locator('[title]').getAttribute('title'),'Продажи/Очень длинная вложенная категория');assert.equal(await p.locator('.phrase-card').nth(1).locator('.phrase-category').count(),0);assert.equal(await p.locator('.phrase-card').nth(1).getByLabel('Фраза выключена',{exact:true}).count(),1);await p.context().close();
  });
  await test('Data settings grouped, histories collapsed and scope explicit',async()=>{
   const p=await open();await nav(p,'Настройки');await shot(p,'settings');await p.locator('.data-settings').scrollIntoViewIfNeeded();await shot(p,'data-settings');assert.equal(await p.locator('.backup-history[open]').count(),0);assert.equal(await p.locator('.backup-history').count(),2);await p.locator('.backup-history summary').first().click();await p.getByText('У этого профиля пока нет снимков.',{exact:true}).waitFor();await p.context().close();
