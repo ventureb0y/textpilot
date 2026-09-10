@@ -9,7 +9,8 @@ use tauri::{
 const OVERLAY_WIDTH: f64 = 360.0;
 const ROW_HEIGHT: f64 = 42.0;
 const FOOTER_HEIGHT: f64 = 34.0;
-const WINDOW_PADDING: f64 = 8.0;
+// CSS: 4px outer margin + 2px border + 8px list padding.
+const WINDOW_PADDING: f64 = 14.0;
 const SCREEN_MARGIN: f64 = 8.0;
 const CARET_GAP: f64 = 6.0;
 
@@ -32,7 +33,7 @@ impl AutocompleteOverlay {
         let window =
             WebviewWindowBuilder::new(app, "autocomplete", WebviewUrl::App("index.html".into()))
                 .title("TextPilot autocomplete")
-                .inner_size(OVERLAY_WIDTH, 84.0)
+                .inner_size(OVERLAY_WIDTH, WINDOW_PADDING + ROW_HEIGHT + FOOTER_HEIGHT)
                 .resizable(false)
                 .decorations(false)
                 .always_on_top(true)

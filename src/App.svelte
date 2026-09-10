@@ -3,7 +3,9 @@
   import { getVersion } from "@tauri-apps/api/app";
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { listen } from "@tauri-apps/api/event";
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
+  import { dialog } from "./lib/dialog";
+  import ActionMenu from "./lib/ActionMenu.svelte";
   import ConfirmDialog from "./lib/ConfirmDialog.svelte";
   import Icon from "./lib/Icon.svelte";
   import SelectControl from "./lib/SelectControl.svelte";
@@ -42,6 +44,7 @@
     message: string;
     details?: string[];
     confirmLabel?: string;
+    cancelLabel?: string;
     resolve: (confirmed: boolean) => void;
   };
 
@@ -191,7 +194,7 @@
   let quickSearchSaving = false;
   let quickSearchError = "";
   let confirmation: ConfirmationState | null = null;
-  let currentAppVersion = "0.0.5";
+  let currentAppVersion = "0.0.7";
   let availableUpdate: Update | null = null;
   let updateModalOpen = false;
   let updateChecking = false;
@@ -207,6 +210,48 @@
   let phraseBody = "";
   let phraseDescription = "";
   let phraseCategoryId = "";
+
+  type FormKind = "phrase" | "dictionary" | "category" | "profile";
+  const initialForms: Partial<Record<FormKind, string>> = {};
+  function formState(kind: FormKind) {
+    return JSON.stringify(kind === "phrase" ? [phraseTitle, phraseSnippet, phraseBody, phraseDescription, phraseCategoryId]
+      : kind === "dictionary" ? [dictionaryWord, dictionaryCategoryId, dictionaryPriority, dictionaryEnabled, dictionaryAutocomplete, dictionaryAutocorrect]
+      : kind === "category" ? [categoryName, categoryParentId] : [profileName]);
+  }
+  function captureForm(kind: FormKind) { initialForms[kind] = formState(kind); }
+  async function requestClose(kind: FormKind) {
+    if (saving || confirmation) return;
+    if (initialForms[kind] !== formState(kind) && !(await askForConfirmation({
+      title: "Закрыть без сохранения?",
+      message: "Внесённые изменения будут потеряны.",
+      confirmLabel: "Закрыть без сохранения",
+      cancelLabel: "Продолжить редактирование",
+    }))) return;
+    ({ phrase: closePhraseModal, dictionary: closeDictionaryModal, category: closeCategoryModal, profile: closeProfileModal })[kind]();
+  }
+  let phraseMain: HTMLElement;
+  let phraseScrollTop = 0;
+  let phraseOpener: HTMLElement | null = null;
+  let lastPhraseCategory: number | "all" | "uncategorized" = "all";
+  async function viewPhrase(phrase: PhraseSummary) {
+    phraseScrollTop = phraseMain?.scrollTop ?? 0;
+    phraseOpener = document.activeElement as HTMLElement;
+    selectedPhrase = phrase;
+    await tick();
+    document.querySelector<HTMLElement>(".detail-back")?.focus();
+  }
+  async function closePhraseView() {
+    selectedPhrase = null;
+    await tick();
+    if (phraseMain) phraseMain.scrollTop = phraseScrollTop;
+    phraseOpener?.focus({ preventScroll: true });
+  }
+  $: if (selectedCategory !== lastPhraseCategory) {
+    lastPhraseCategory = selectedCategory;
+    selectedPhrase = null;
+    phraseScrollTop = 0;
+    if (phraseMain) phraseMain.scrollTop = 0;
+  }
 
   $: activeProfile = data?.profiles.find((profile) => profile.id === data?.activeProfileId);
   $: selectedCategoryRecord =
@@ -291,6 +336,7 @@
         stopListening = unlisten;
       });
     } else if (new URLSearchParams(location.search).has("new")) {
+      captureForm("phrase");
       phraseModalOpen = true;
     }
 
@@ -380,7 +426,7 @@
   }
 
   async function loadDashboard() {
-    loading = true;
+    loading = data === null;
     error = "";
     if (!("__TAURI_INTERNALS__" in window)) {
       data = previewData;
@@ -470,6 +516,7 @@
     editingProfileId = profile?.id ?? null;
     profileName = profile?.name ?? "";
     profileFormError = "";
+    captureForm("profile");
     profileModalOpen = true;
   }
 
@@ -481,6 +528,7 @@
   }
 
   async function saveProfile() {
+    if (saving) return;
     const name = profileName.trim();
     profileFormError = "";
     if (!name) {
@@ -499,8 +547,9 @@
           name,
         });
       }
-      closeProfileModal();
       await loadDashboard();
+      saving = false;
+      closeProfileModal();
     } catch (cause) {
       profileFormError = readableError(cause);
     } finally {
@@ -582,6 +631,7 @@
     dictionaryAutocomplete = entry?.autocompleteEnabled ?? true;
     dictionaryAutocorrect = entry?.autocorrectEnabled ?? true;
     dictionaryFormError = "";
+    captureForm("dictionary");
     dictionaryModalOpen = true;
   }
 
@@ -592,6 +642,7 @@
   }
 
   async function saveDictionaryWord() {
+    if (saving) return;
     const word = dictionaryWord.trim();
     dictionaryFormError = "";
     if (!word || !/^[\p{L}-]+$/u.test(word)) {
@@ -616,8 +667,9 @@
           autocorrectEnabled: dictionaryAutocorrect,
         },
       });
-      closeDictionaryModal();
       await loadDashboard();
+      saving = false;
+      closeDictionaryModal();
     } catch (cause) {
       dictionaryFormError = readableError(cause);
     } finally {
@@ -658,7 +710,7 @@
         eyebrow: "Удаление из словаря",
         title: `Удалить слово «${entry.word}»?`,
         message:
-          "Слово перестанет участвовать в автокомплите и автокоррекции текущего профиля.",
+          "Слово перестанет участвовать в автодополнении и автокоррекции текущего профиля.",
         confirmLabel: "Удалить слово",
       }))
     ) return;
@@ -728,6 +780,8 @@
     }
   }
 
+  function requestCloseImport() { if (!transferBusy) closeImportModal(); }
+
   function closeImportModal() {
     importModalOpen = false;
     importFileName = "";
@@ -737,7 +791,7 @@
   }
 
   async function applyImport() {
-    if (!importJson || !importPreview) return;
+    if (transferBusy || !importJson || !importPreview) return;
 
     transferBusy = true;
     transferError = "";
@@ -746,7 +800,7 @@
         json: importJson,
         strategy: importStrategy,
       });
-      const backup = result.backupPath ? ` Backup: ${result.backupPath}` : "";
+      const backup = result.backupPath ? ` Резервная копия: ${result.backupPath}` : "";
       const skipped = result.skippedConflicts
         ? ` Пропущено конфликтов: ${result.skippedConflicts}.`
         : "";
@@ -928,6 +982,7 @@
     categoryName = category?.name ?? "";
     categoryParentId = String(category?.parentId ?? parentId ?? "");
     formError = "";
+    captureForm("category");
     categoryModalOpen = true;
   }
 
@@ -940,6 +995,7 @@
   }
 
   async function saveCategory() {
+    if (saving) return;
     const name = categoryName.trim();
     formError = "";
     if (!name) {
@@ -965,8 +1021,9 @@
           input: { id: editingCategoryId, name },
         });
       }
-      closeCategoryModal();
       await loadDashboard();
+      saving = false;
+      closeCategoryModal();
     } catch (cause) {
       formError = readableError(cause);
     } finally {
@@ -1012,14 +1069,15 @@
   }
 
   async function savePhrase() {
+    if (saving) return;
     formError = "";
     const snippet = phraseSnippet.trim();
     if (!phraseTitle.trim() || !snippet || !phraseBody.trim()) {
-      formError = "Заполните название, сниппет и текст фразы.";
+      formError = "Заполните название, сокращение и текст фразы.";
       return;
     }
     if (snippet.length > 64 || !snippetPattern.test(snippet)) {
-      formError = "Сниппет может содержать до 64 букв, цифр, дефисов и знаков подчёркивания.";
+      formError = "Сокращение может содержать до 64 букв, цифр, дефисов и знаков подчёркивания.";
       return;
     }
 
@@ -1039,8 +1097,9 @@
           input: { id: editingPhraseId, ...input },
         });
       }
-      closePhraseModal();
       await loadDashboard();
+      saving = false;
+      closePhraseModal();
     } catch (cause) {
       formError = readableError(cause);
     } finally {
@@ -1057,6 +1116,7 @@
     phraseCategoryId =
       typeof selectedCategory === "number" ? String(selectedCategory) : "";
     formError = "";
+    captureForm("phrase");
     phraseModalOpen = true;
   }
 
@@ -1071,6 +1131,7 @@
     phraseCategoryId = phrase.categoryId === null ? "" : String(phrase.categoryId);
     formError = "";
     phraseActionError = "";
+    captureForm("phrase");
     phraseModalOpen = true;
   }
 
@@ -1105,7 +1166,7 @@
       !(await askForConfirmation({
         eyebrow: "Удаление фразы",
         title: `Удалить «${phrase.title}»?`,
-        message: `Сниппет «${phrase.snippet}» и текст фразы будут удалены без возможности восстановления.`,
+        message: `Сокращение «${phrase.snippet}» и текст фразы будут удалены без возможности восстановления.`,
         confirmLabel: "Удалить фразу",
       }))
     ) return;
@@ -1129,7 +1190,7 @@
       message.includes("UNIQUE constraint failed: phrases.profile_id, phrases.snippet") ||
       message.includes("UNIQUE constraint failed: phrases.profile_id, phrases.snippet_key")
     ) {
-      return "Такой сниппет уже есть в активном профиле.";
+      return "Такое сокращение уже есть в активном профиле.";
     }
     if (message.includes("UNIQUE constraint failed: categories.profile_id, categories.path")) {
       return "Категория с таким названием уже существует.";
@@ -1471,11 +1532,11 @@
     </header>
 
     {#if activeSection === "phrases"}
-      <div class="content-layout">
+      <div class="content-layout" class:has-detail={selectedPhrase !== null}>
         <aside class="category-sidebar">
           <div class="sidebar-heading">
             <div>
-              <span>Библиотека</span>
+
               <strong>Категории</strong>
             </div>
             <button
@@ -1574,12 +1635,10 @@
           </div>
         </aside>
 
-        <main class="main-content">
+        <main class="main-content phrase-main" bind:this={phraseMain}>
           <div class="page-header">
             <div>
-              <span class="page-kicker">Рабочие шаблоны</span>
-              <h1>Фразы и сниппеты</h1>
-              <p>Введите короткую команду и нажмите Tab, чтобы вставить готовый текст.</p>
+              <h1>Фразы</h1>
             </div>
             <button class="primary-button" onclick={openPhraseModal}>
               <Icon name="plus" size={18} strokeWidth={2.2} />
@@ -1590,7 +1649,7 @@
           <div class="toolbar">
             <label class="search-field">
               <Icon name="search" size={18} />
-              <input bind:value={search} placeholder="Поиск по названию, сниппету или тексту" />
+              <input aria-label="Поиск фраз" bind:value={search} placeholder="Поиск по названию, сокращению или тексту" />
               {#if search}
                 <button onclick={() => (search = "")} aria-label="Очистить поиск">
                   <Icon name="close" size={15} />
@@ -1600,6 +1659,7 @@
             <span class="result-count">{filteredPhrases.length} {filteredPhrases.length === 1 ? "фраза" : "фраз"}</span>
           </div>
 
+          {#if phraseActionError && !selectedPhrase}<p class="page-error" role="alert">{phraseActionError}</p>{/if}
           {#if loading}
             <div class="loading-state">
               <span></span><span></span><span></span>
@@ -1613,11 +1673,11 @@
           {:else if filteredPhrases.length === 0}
             <div class="message-state empty-state">
               <div class="empty-icon"><Icon name="phrase" size={26} /></div>
-              <strong>{search ? "Ничего не найдено" : "Здесь появятся ваши фразы"}</strong>
+              <strong>{search ? "Ничего не найдено" : selectedCategory !== "all" ? "В этой категории пока нет фраз" : "Здесь появятся ваши фразы"}</strong>
               <p>
                 {search
                   ? "Попробуйте изменить запрос или выбрать другую категорию."
-                  : "Создайте первую фразу, затем введите её сниппет, например кп, и нажмите Tab."}
+                  : "Создайте первую фразу, затем введите её сокращение, например кп, и нажмите Tab."}
               </p>
               {#if !search}
                 <button class="secondary-button" onclick={openPhraseModal}>
@@ -1628,13 +1688,9 @@
             </div>
           {:else}
             <div class="phrase-list">
-              {#each filteredPhrases as phrase}
-                <button
-                  class:selected={selectedPhrase?.id === phrase.id}
-                  class="phrase-card"
-                  onclick={() => (selectedPhrase = phrase)}
-                >
-                  <span class="phrase-glyph">{phrase.title.slice(0, 1).toLocaleUpperCase("ru")}</span>
+              {#each filteredPhrases as phrase (phrase.id)}
+                <article class:selected={selectedPhrase?.id === phrase.id} class="phrase-card">
+                  <button class="phrase-open" onclick={() => viewPhrase(phrase)} aria-label={`Просмотреть фразу «${phrase.title}»`}>
                   <span class="phrase-content">
                     <span class="phrase-heading">
                       <strong>{phrase.title}</strong>
@@ -1642,14 +1698,19 @@
                     </span>
                     <span class="phrase-preview">{phrase.body}</span>
                     <span class="phrase-meta">
-                      <span>{categoryNameById(phrase.categoryId)}</span>
-                      <span class:enabled={phrase.isEnabled} class="enabled-label">
-                        {phrase.isEnabled ? "Активна" : "Выключена"}
-                      </span>
+                      {#if phrase.categoryId !== selectedCategory && !(phrase.categoryId === null && selectedCategory === "uncategorized")}
+                        <span>{categoryNameById(phrase.categoryId)}</span>
+                      {/if}
+                      {#if !phrase.isEnabled}<span class="enabled-label">Выключена</span>{/if}
                     </span>
                   </span>
-                  <span class="card-menu"><Icon name="more" size={18} /></span>
-                </button>
+                  </button>
+                  <ActionMenu label={`Действия с фразой «${phrase.title}»`} disabled={saving} items={[
+                    { label: "Редактировать", action: () => openEditPhraseModal(phrase) },
+                    { label: phrase.isEnabled ? "Выключить" : "Включить", action: () => togglePhraseEnabled(phrase) },
+                    { label: "Удалить", action: () => deletePhrase(phrase), danger: true },
+                  ]} />
+                </article>
               {/each}
             </div>
           {/if}
@@ -1658,14 +1719,14 @@
         {#if selectedPhrase}
           <aside class="detail-panel">
             <div class="detail-header">
+              <button class="ghost-button detail-back" onclick={closePhraseView}>← Назад</button>
               <span>Просмотр фразы</span>
-              <button class="icon-button" onclick={() => (selectedPhrase = null)} title="Закрыть">
+              <button class="icon-button" onclick={closePhraseView} title="Закрыть">
                 <Icon name="close" size={18} />
               </button>
             </div>
             <div class="detail-body">
               <div class="detail-title">
-                <span class="phrase-glyph large">{selectedPhrase.title.slice(0, 1)}</span>
                 <div>
                   <h2>{selectedPhrase.title}</h2>
                   <code>{selectedPhrase.snippet}</code>
@@ -1720,7 +1781,6 @@
         <aside class="category-sidebar">
           <div class="sidebar-heading">
             <div>
-              <span>Словарь</span>
               <strong>Категории</strong>
             </div>
           </div>
@@ -1778,8 +1838,7 @@
         <main class="main-content dictionary-page">
           <div class="page-header">
             <div>
-              <span class="page-kicker">Правильные слова</span>
-              <h1>Пользовательский словарь</h1>
+              <h1>Словарь</h1>
               <p>Слова из активного профиля будут использоваться для подсказок и исправлений.</p>
             </div>
             <button class="primary-button" onclick={() => openDictionaryModal()}>
@@ -1791,7 +1850,7 @@
           <div class="toolbar">
             <label class="search-field">
               <Icon name="search" size={18} />
-              <input bind:value={dictionarySearch} placeholder="Поиск по словарю" />
+              <input aria-label="Поиск слов" bind:value={dictionarySearch} placeholder="Поиск по словарю" />
               {#if dictionarySearch}
                 <button onclick={() => (dictionarySearch = "")} aria-label="Очистить поиск">
                   <Icon name="close" size={15} />
@@ -1810,11 +1869,11 @@
           {#if filteredDictionaryWords.length === 0}
             <div class="message-state empty-state">
               <div class="empty-icon"><Icon name="book" size={26} /></div>
-              <strong>{dictionarySearch ? "Слово не найдено" : "Словарь пока пуст"}</strong>
+              <strong>{dictionarySearch ? "Слово не найдено" : selectedDictionaryCategory !== "all" ? "В этой категории пока нет слов" : "Словарь пока пуст"}</strong>
               <p>
                 {dictionarySearch
                   ? "Измените запрос или выберите другую категорию."
-                  : "Добавьте правильные рабочие слова для будущего автокомплита и автокоррекции."}
+                  : "Добавьте правильные рабочие слова для автодополнения и автокоррекции."}
               </p>
               {#if !dictionarySearch}
                 <button class="secondary-button" onclick={() => openDictionaryModal()}>
@@ -1825,43 +1884,41 @@
             </div>
           {:else}
             <div class="dictionary-list">
-              {#each filteredDictionaryWords as entry}
+              {#each filteredDictionaryWords as entry (entry.id)}
                 <article class:disabled={!entry.isEnabled} class="dictionary-card">
-                  <span class="dictionary-glyph">
-                    {entry.word.slice(0, 1).toLocaleUpperCase("ru")}
-                  </span>
 
                   <div class="dictionary-content">
                     <div class="dictionary-heading">
                       <strong>{entry.word}</strong>
-                      <span class="dictionary-priority-chip" title="Приоритет слова">
-                        П {entry.priority}
-                      </span>
                     </div>
 
+                    <span class="dictionary-category">{categoryNameById(entry.categoryId)}</span>
+                  </div>
                     <div class="dictionary-meta">
-                      <span>{categoryNameById(entry.categoryId)}</span>
                       <button
+                        aria-label="Включено" aria-pressed={entry.isEnabled}
                         class:enabled={entry.isEnabled}
                         onclick={() =>
                           updateDictionaryWord(entry, { isEnabled: !entry.isEnabled })}
                         disabled={saving}
                         title="Включить или отключить слово"
                       >
-                        {entry.isEnabled ? "Активно" : "Выключено"}
+                        Включено
                       </button>
                       <button
+                        aria-label="Автодополнение" aria-pressed={entry.autocompleteEnabled}
                         class:enabled={entry.autocompleteEnabled}
                         onclick={() =>
                           updateDictionaryWord(entry, {
                             autocompleteEnabled: !entry.autocompleteEnabled,
                           })}
                         disabled={saving}
-                        title="Использовать для автокомплита"
+                        title="Использовать для автодополнения"
                       >
-                        Автокомплит
+                        Автодополнение
                       </button>
                       <button
+                        aria-label="Автокоррекция" aria-pressed={entry.autocorrectEnabled}
                         class:enabled={entry.autocorrectEnabled}
                         onclick={() =>
                           updateDictionaryWord(entry, {
@@ -1873,33 +1930,12 @@
                         Автокоррекция
                       </button>
                     </div>
-                  </div>
 
                   <div class="dictionary-actions">
-                    <details class="dictionary-menu">
-                      <summary title="Действия со словом" aria-label="Действия со словом">
-                        <Icon name="more" size={17} strokeWidth={2} />
-                      </summary>
-                      <div class="dictionary-menu-panel">
-                        <button
-                          type="button"
-                          onclick={() => openDictionaryModal(entry)}
-                          disabled={saving}
-                        >
-                          <Icon name="edit" size={15} />
-                          Редактировать
-                        </button>
-                        <button
-                          type="button"
-                          class="danger-action"
-                          onclick={() => deleteDictionaryWord(entry)}
-                          disabled={saving}
-                        >
-                          <Icon name="trash" size={15} />
-                          Удалить
-                        </button>
-                      </div>
-                    </details>
+                    <ActionMenu label={`Действия со словом «${entry.word}»`} disabled={saving} items={[
+                      { label: "Редактировать", action: () => openDictionaryModal(entry) },
+                      { label: "Удалить", action: () => deleteDictionaryWord(entry), danger: true },
+                    ]} />
                   </div>
                 </article>
               {/each}
@@ -1911,9 +1947,8 @@
       <main class="main-content profiles-page">
         <div class="page-header">
           <div>
-            <span class="page-kicker">Рабочие пространства</span>
             <h1>Профили</h1>
-            <p>Каждый профиль хранит собственные категории, фразы, сниппеты и словарь.</p>
+            <p>Каждый профиль хранит собственные категории, фразы, сокращения и словарь.</p>
           </div>
           <button class="primary-button" onclick={() => openProfileModal()}>
             <Icon name="plus" size={18} strokeWidth={2.2} />
@@ -1980,7 +2015,6 @@
       <main class="main-content settings-page">
         <div class="page-header">
           <div>
-            <span class="page-kicker">Конфигурация</span>
             <h1>Настройки</h1>
             <p>
               Управляйте горячими клавишами и переносите профили через локальные JSON-файлы.
@@ -2000,7 +2034,6 @@
           <section class="settings-card update-settings-card">
             <div class="settings-card-icon"><Icon name="spark" size={21} /></div>
             <div class="settings-card-copy">
-              <span class="page-kicker">Обновления</span>
               <h2>TextPilot <span class="update-version-badge">v{currentAppVersion}</span></h2>
               <p>
                 Программа проверяет подписанные обновления после запуска. Установка
@@ -2044,11 +2077,10 @@
           <section class="settings-card hotkey-settings-card">
             <div class="settings-card-icon"><Icon name="book" size={21} /></div>
             <div class="settings-card-copy">
-              <span class="page-kicker">Производительность</span>
               <h2>Подсказки из словаря</h2>
               <p>
                 Ищет варианты в пользовательском словаре после каждого введённого символа.
-                Отключите на слабых компьютерах — сниппеты и автокоррекция продолжат работать.
+                Отключите на слабых компьютерах — сокращения и автокоррекция продолжат работать.
               </p>
             </div>
             <div class="hotkey-setting-row">
@@ -2077,7 +2109,6 @@
           <section class="settings-card hotkey-settings-card">
             <div class="settings-card-icon"><Icon name="search" size={21} /></div>
             <div class="settings-card-copy">
-              <span class="page-kicker">Горячие клавиши</span>
               <h2>Быстрый поиск</h2>
               <p>
                 Открывает поиск по фразам и словарю из любого приложения. Когда функция
@@ -2107,13 +2138,15 @@
             {/if}
           </section>
 
+          <section class="data-settings" aria-labelledby="data-settings-title">
+          <h2 id="data-settings-title">Данные и резервные копии</h2>
+          <div class="data-settings-grid">
           <section class="settings-card">
             <div class="settings-card-icon"><Icon name="download" size={21} /></div>
             <div class="settings-card-copy">
-              <span class="page-kicker">Резервная копия конфигурации</span>
               <h2>Экспорт JSON</h2>
               <p>
-                Файл содержит категории, фразы, сниппеты, словарь и рабочие флаги.
+                Файл содержит категории, фразы, сокращения, словарь и настройки.
                 Перед сохранением можно выбрать папку и изменить имя файла.
               </p>
             </div>
@@ -2140,7 +2173,6 @@
           <section class="settings-card">
             <div class="settings-card-icon"><Icon name="upload" size={21} /></div>
             <div class="settings-card-copy">
-              <span class="page-kicker">Восстановление и перенос</span>
               <h2>Импорт JSON</h2>
               <p>
                 Сначала увидите состав файла и количество конфликтов. Данные меняются
@@ -2162,8 +2194,7 @@
           <section class="settings-card backup-history-card">
             <div class="settings-card-icon"><Icon name="history" size={21} /></div>
             <div class="settings-card-copy">
-              <span class="page-kicker">История активного профиля</span>
-              <h2>{activeProfile?.name ?? "Активный профиль"}</h2>
+              <h2>Резервные копии профиля «{activeProfile?.name ?? "Активный профиль"}»</h2>
               <p>
                 Снимок содержит категории, фразы и словарь только этого профиля.
                 Восстановление не меняет остальные профили.
@@ -2180,7 +2211,7 @@
               </button>
             </div>
 
-            <div class="backup-list">
+            <details class="backup-history"><summary>История резервных копий</summary><div class="backup-list">
               {#if profileSnapshotsLoading}
                 <div class="backup-empty">Загружаю снимки профиля...</div>
               {:else if profileSnapshots.length === 0}
@@ -2207,21 +2238,20 @@
                   </div>
                 {/each}
               {/if}
-            </div>
+            </div></details>
           </section>
 
           <section class="settings-card backup-history-card">
             <div class="settings-card-icon"><Icon name="history" size={21} /></div>
             <div class="settings-card-copy">
-              <span class="page-kicker">История базы данных</span>
-              <h2>Предыдущие версии</h2>
+              <h2>Резервные копии всей базы</h2>
               <p>
                 Это глобальные снимки всей базы: восстановление затрагивает все профили.
                 Перед откатом TextPilot сохранит текущее состояние отдельным снимком.
               </p>
             </div>
 
-            <div class="backup-list">
+            <details class="backup-history"><summary>История резервных копий</summary><div class="backup-list">
               {#if backupsLoading}
                 <div class="backup-empty">Загружаю резервные копии...</div>
               {:else if backups.length === 0}
@@ -2247,19 +2277,20 @@
                   </div>
                 {/each}
               {/if}
-            </div>
+            </div></details>
           </section>
 
           <section class="settings-card safety-card">
             <div class="settings-card-icon"><Icon name="shield" size={21} /></div>
             <div class="settings-card-copy">
-              <span class="page-kicker">Безопасность данных</span>
               <h2>Как работает импорт</h2>
               <p>
-                JSON валидируется до записи. Изменения применяются одной транзакцией,
-                а backup SQLite хранится рядом с базой в папке `backups`.
+                Перед импортом автоматически создаётся резервная копия всей базы.
+                Если файл содержит ошибки, данные останутся без изменений.
               </p>
             </div>
+          </section>
+          </div>
           </section>
         </div>
 
@@ -2284,10 +2315,9 @@
       }
     }}
   >
-    <div class="modal compact-modal update-modal" role="dialog" aria-modal="true" aria-labelledby="update-modal-title">
+    <div class="modal compact-modal update-modal" role="dialog" aria-modal="true" aria-labelledby="update-modal-title" use:dialog={{ onClose: () => { if (!updateInstalling) updateModalOpen = false; }, busy: updateInstalling }}>
       <header class="modal-header">
         <div>
-          <span class="page-kicker">Обновление TextPilot</span>
           <h2 id="update-modal-title">Версия {availableUpdate.version}</h2>
         </div>
         <button
@@ -2357,37 +2387,37 @@
 {/if}
 
 {#if phraseModalOpen}
-  <div class="modal-backdrop" role="presentation" onclick={(event) => event.target === event.currentTarget && closePhraseModal()}>
-    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="new-phrase-title">
+  <div class="modal-backdrop" role="presentation" onclick={(event) => event.target === event.currentTarget && requestClose("phrase")}>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="new-phrase-title" use:dialog={{ onClose: () => requestClose("phrase"), busy: saving }}>
       <header class="modal-header">
         <div>
-          <span class="page-kicker">{editingPhraseId === null ? "Новый шаблон" : "Изменение шаблона"}</span>
           <h2 id="new-phrase-title">{editingPhraseId === null ? "Создать фразу" : "Редактировать фразу"}</h2>
         </div>
-        <button class="icon-button" onclick={closePhraseModal} title="Закрыть">
+        <button class="icon-button" onclick={() => requestClose("phrase")} disabled={saving} title="Закрыть">
           <Icon name="close" size={19} />
         </button>
       </header>
 
       <form onsubmit={(event) => { event.preventDefault(); savePhrase(); }}>
+        <fieldset class="form-fields" disabled={saving}>
         <div class="form-grid">
           <label class="form-field wide">
             <span>Название</span>
-            <input bind:value={phraseTitle} placeholder="Коммерческое предложение" />
+            <input aria-label="Название" bind:value={phraseTitle} placeholder="Коммерческое предложение" />
           </label>
 
           <label class="form-field">
-            <span>Сниппет</span>
+            <span>Сокращение</span>
             <div class="snippet-input">
               <input
-                bind:value={phraseSnippet}
+                aria-label="Сокращение" bind:value={phraseSnippet}
                 placeholder="кп"
                 maxlength="64"
                 spellcheck="false"
                 autocomplete="off"
               />
             </div>
-            <small>Введите сниппет и нажмите Tab для вставки фразы.</small>
+            <small>Введите сокращение и нажмите Tab для вставки фразы.</small>
           </label>
 
           <div class="form-field">
@@ -2408,7 +2438,7 @@
           <label class="form-field wide">
             <span>Текст фразы</span>
             <textarea
-              bind:value={phraseBody}
+              aria-label="Текст фразы" bind:value={phraseBody}
               rows="7"
               placeholder="Здравствуйте! Отправляю вам коммерческое предложение..."
             ></textarea>
@@ -2417,14 +2447,14 @@
 
           <label class="form-field wide">
             <span>Описание <em>необязательно</em></span>
-            <input bind:value={phraseDescription} placeholder="Когда использовать эту фразу" />
+            <input aria-label="Описание" bind:value={phraseDescription} placeholder="Когда использовать эту фразу" />
           </label>
         </div>
 
-        {#if formError}<p class="form-error">{formError}</p>{/if}
+        {#if formError}<p class="form-error" role="alert">{formError}</p>{/if}
 
         <footer class="modal-footer">
-          <button type="button" class="ghost-button" onclick={closePhraseModal}>Отмена</button>
+          <button type="button" class="ghost-button" onclick={() => requestClose("phrase")}>Отмена</button>
           <button type="submit" class="primary-button" disabled={saving}>
             {saving
               ? "Сохраняем..."
@@ -2433,6 +2463,8 @@
                 : "Сохранить изменения"}
           </button>
         </footer>
+
+        </fieldset>
       </form>
     </div>
   </div>
@@ -2442,19 +2474,19 @@
   <div
     class="modal-backdrop"
     role="presentation"
-    onclick={(event) => event.target === event.currentTarget && closeImportModal()}
+    onclick={(event) => event.target === event.currentTarget && requestCloseImport()}
   >
-    <div class="modal import-modal" role="dialog" aria-modal="true" aria-labelledby="import-modal-title">
+    <div class="modal import-modal" role="dialog" aria-modal="true" aria-labelledby="import-modal-title" use:dialog={{ onClose: requestCloseImport, busy: transferBusy }}>
       <header class="modal-header">
         <div>
-          <span class="page-kicker">Предварительный просмотр</span>
           <h2 id="import-modal-title">Импорт «{importFileName}»</h2>
         </div>
-        <button class="icon-button" onclick={closeImportModal} title="Закрыть">
+        <button class="icon-button" onclick={requestCloseImport} disabled={transferBusy} title="Закрыть">
           <Icon name="close" size={19} />
         </button>
       </header>
 
+      <p class="import-target">Перед импортом автоматически создаётся резервная копия всей базы.</p>
       <div class="import-summary">
         <span><strong>{importPreview.profileCount}</strong> профилей</span>
         <span><strong>{importPreview.categoryCount}</strong> категорий</span>
@@ -2483,7 +2515,7 @@
               : "Найдены совпадения"}
           </strong>
           <span>
-            Сниппеты: {importPreview.snippetConflicts}, слова: {importPreview.wordConflicts}
+            Сокращения: {importPreview.snippetConflicts}, слова: {importPreview.wordConflicts}
           </span>
         </div>
       </div>
@@ -2502,18 +2534,18 @@
             <input type="radio" bind:group={importStrategy} value="overwrite" />
             <span>
               <strong>Перезаписать конфликты</strong>
-              <small>Совпавшие сниппеты и слова будут заменены данными из файла.</small>
+              <small>Совпавшие сокращения и слова будут заменены данными из файла.</small>
             </span>
           </label>
         </fieldset>
       {/if}
 
-      {#if transferError}<p class="form-error">{transferError}</p>{/if}
+      {#if transferError}<p class="form-error" role="alert">{transferError}</p>{/if}
 
       <footer class="modal-footer">
-        <button type="button" class="ghost-button" onclick={closeImportModal}>Отмена</button>
+        <button type="button" class="ghost-button" onclick={requestCloseImport} disabled={transferBusy}>Отмена</button>
         <button type="button" class="primary-button" onclick={applyImport} disabled={transferBusy}>
-          {transferBusy ? "Импортируем..." : "Создать backup и импортировать"}
+          {transferBusy ? "Импортируем..." : "Импортировать"}
         </button>
       </footer>
     </div>
@@ -2524,29 +2556,27 @@
   <div
     class="modal-backdrop"
     role="presentation"
-    onclick={(event) => event.target === event.currentTarget && closeDictionaryModal()}
+    onclick={(event) => event.target === event.currentTarget && requestClose("dictionary")}
   >
-    <div class="modal compact-modal" role="dialog" aria-modal="true" aria-labelledby="dictionary-modal-title">
+    <div class="modal compact-modal" role="dialog" aria-modal="true" aria-labelledby="dictionary-modal-title" use:dialog={{ onClose: () => requestClose("dictionary"), busy: saving }}>
       <header class="modal-header">
         <div>
-          <span class="page-kicker">
-            {editingDictionaryWordId === null ? "Новое слово" : "Изменение слова"}
-          </span>
           <h2 id="dictionary-modal-title">
             {editingDictionaryWordId === null ? "Добавить в словарь" : "Редактировать слово"}
           </h2>
         </div>
-        <button class="icon-button" onclick={closeDictionaryModal} title="Закрыть">
+        <button class="icon-button" onclick={() => requestClose("dictionary")} disabled={saving} title="Закрыть">
           <Icon name="close" size={19} />
         </button>
       </header>
 
       <form onsubmit={(event) => { event.preventDefault(); saveDictionaryWord(); }}>
+        <fieldset class="form-fields" disabled={saving}>
         <div class="form-grid">
           <label class="form-field wide">
             <span>Правильное слово</span>
             <input
-              bind:value={dictionaryWord}
+              aria-label="Правильное слово" bind:value={dictionaryWord}
               maxlength="64"
               placeholder="Например, согласование"
               autocomplete="off"
@@ -2572,7 +2602,7 @@
 
           <label class="form-field">
             <span>Приоритет</span>
-            <input bind:value={dictionaryPriority} type="number" min="0" max="100" />
+            <input aria-label="Приоритет" bind:value={dictionaryPriority} type="number" min="0" max="100" />
             <small>Чем выше число, тем важнее слово при выборе подсказки.</small>
           </label>
         </div>
@@ -2584,7 +2614,7 @@
           </label>
           <label>
             <input type="checkbox" bind:checked={dictionaryAutocomplete} />
-            <span><strong>Автокомплит</strong><small>Предлагать при вводе начала слова.</small></span>
+            <span><strong>Автодополнение</strong><small>Предлагать при вводе начала слова.</small></span>
           </label>
           <label>
             <input type="checkbox" bind:checked={dictionaryAutocorrect} />
@@ -2592,10 +2622,10 @@
           </label>
         </div>
 
-        {#if dictionaryFormError}<p class="form-error">{dictionaryFormError}</p>{/if}
+        {#if dictionaryFormError}<p class="form-error" role="alert">{dictionaryFormError}</p>{/if}
 
         <footer class="modal-footer">
-          <button type="button" class="ghost-button" onclick={closeDictionaryModal}>Отмена</button>
+          <button type="button" class="ghost-button" onclick={() => requestClose("dictionary")}>Отмена</button>
           <button type="submit" class="primary-button" disabled={saving}>
             {saving
               ? "Сохраняем..."
@@ -2604,6 +2634,8 @@
                 : "Сохранить изменения"}
           </button>
         </footer>
+
+        </fieldset>
       </form>
     </div>
   </div>
@@ -2613,29 +2645,27 @@
   <div
     class="modal-backdrop"
     role="presentation"
-    onclick={(event) => event.target === event.currentTarget && closeCategoryModal()}
+    onclick={(event) => event.target === event.currentTarget && requestClose("category")}
   >
-    <div class="modal compact-modal" role="dialog" aria-modal="true" aria-labelledby="category-modal-title">
+    <div class="modal compact-modal" role="dialog" aria-modal="true" aria-labelledby="category-modal-title" use:dialog={{ onClose: () => requestClose("category"), busy: saving }}>
       <header class="modal-header">
         <div>
-          <span class="page-kicker">
-            {editingCategoryId === null ? "Новая папка" : "Изменение категории"}
-          </span>
           <h2 id="category-modal-title">
             {editingCategoryId === null ? "Создать категорию" : "Переименовать категорию"}
           </h2>
         </div>
-        <button class="icon-button" onclick={closeCategoryModal} title="Закрыть">
+        <button class="icon-button" onclick={() => requestClose("category")} disabled={saving} title="Закрыть">
           <Icon name="close" size={19} />
         </button>
       </header>
 
       <form onsubmit={(event) => { event.preventDefault(); saveCategory(); }}>
+        <fieldset class="form-fields" disabled={saving}>
         <div class="category-form-grid">
           <label class="form-field">
             <span>Название</span>
             <input
-              bind:value={categoryName}
+              aria-label="Название" bind:value={categoryName}
               maxlength="80"
               placeholder="Например, Сроки"
               autocomplete="off"
@@ -2671,10 +2701,10 @@
           {/if}
         </div>
 
-        {#if formError}<p class="form-error">{formError}</p>{/if}
+        {#if formError}<p class="form-error" role="alert">{formError}</p>{/if}
 
         <footer class="modal-footer">
-          <button type="button" class="ghost-button" onclick={closeCategoryModal}>Отмена</button>
+          <button type="button" class="ghost-button" onclick={() => requestClose("category")}>Отмена</button>
           <button type="submit" class="primary-button" disabled={saving}>
             {saving
               ? "Сохраняем..."
@@ -2683,6 +2713,8 @@
                 : "Сохранить название"}
           </button>
         </footer>
+
+        </fieldset>
       </form>
     </div>
   </div>
@@ -2695,6 +2727,7 @@
   message={confirmation?.message ?? ""}
   details={confirmation?.details ?? []}
   confirmLabel={confirmation?.confirmLabel}
+  cancelLabel={confirmation?.cancelLabel}
   onConfirm={() => resolveConfirmation(true)}
   onCancel={() => resolveConfirmation(false)}
 />
@@ -2703,28 +2736,26 @@
   <div
     class="modal-backdrop"
     role="presentation"
-    onclick={(event) => event.target === event.currentTarget && closeProfileModal()}
+    onclick={(event) => event.target === event.currentTarget && requestClose("profile")}
   >
-    <div class="modal compact-modal" role="dialog" aria-modal="true" aria-labelledby="profile-modal-title">
+    <div class="modal compact-modal" role="dialog" aria-modal="true" aria-labelledby="profile-modal-title" use:dialog={{ onClose: () => requestClose("profile"), busy: saving }}>
       <header class="modal-header">
         <div>
-          <span class="page-kicker">
-            {editingProfileId === null ? "Новое пространство" : "Изменение профиля"}
-          </span>
           <h2 id="profile-modal-title">
             {editingProfileId === null ? "Создать профиль" : "Переименовать профиль"}
           </h2>
         </div>
-        <button class="icon-button" onclick={closeProfileModal} title="Закрыть">
+        <button class="icon-button" onclick={() => requestClose("profile")} disabled={saving} title="Закрыть">
           <Icon name="close" size={19} />
         </button>
       </header>
 
       <form onsubmit={(event) => { event.preventDefault(); saveProfile(); }}>
+        <fieldset class="form-fields" disabled={saving}>
         <label class="form-field">
           <span>Название профиля</span>
           <input
-            bind:value={profileName}
+            aria-label="Название профиля" bind:value={profileName}
             maxlength="80"
             placeholder="Например, Типография"
             autocomplete="off"
@@ -2734,10 +2765,10 @@
           {/if}
         </label>
 
-        {#if profileFormError}<p class="form-error">{profileFormError}</p>{/if}
+        {#if profileFormError}<p class="form-error" role="alert">{profileFormError}</p>{/if}
 
         <footer class="modal-footer">
-          <button type="button" class="ghost-button" onclick={closeProfileModal}>Отмена</button>
+          <button type="button" class="ghost-button" onclick={() => requestClose("profile")}>Отмена</button>
           <button type="submit" class="primary-button" disabled={saving}>
             {saving
               ? "Сохраняем..."
@@ -2746,6 +2777,8 @@
                 : "Сохранить название"}
           </button>
         </footer>
+
+        </fieldset>
       </form>
     </div>
   </div>

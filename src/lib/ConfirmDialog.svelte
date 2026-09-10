@@ -1,9 +1,10 @@
 <script lang="ts">
+  import { dialog } from "./dialog";
   import Icon from "./Icon.svelte";
 
   let {
     open,
-    eyebrow = "Подтверждение действия",
+    eyebrow = "",
     title,
     message,
     details = [],
@@ -23,35 +24,7 @@
     onCancel: () => void;
   } = $props();
 
-  let cancelButton = $state<HTMLButtonElement>();
-  let confirmButton = $state<HTMLButtonElement>();
-
-  $effect(() => {
-    if (open) {
-      window.setTimeout(() => cancelButton?.focus(), 0);
-    }
-  });
-
-  function handleKeydown(event: KeyboardEvent) {
-    if (!open) return;
-
-    if (event.key === "Escape") {
-      event.preventDefault();
-      onCancel();
-    } else if (event.key === "Tab") {
-      const active = document.activeElement;
-      if (event.shiftKey && active === cancelButton) {
-        event.preventDefault();
-        confirmButton?.focus();
-      } else if (!event.shiftKey && active === confirmButton) {
-        event.preventDefault();
-        cancelButton?.focus();
-      }
-    }
-  }
 </script>
-
-<svelte:window onkeydown={handleKeydown} />
 
 {#if open}
   <div
@@ -61,6 +34,7 @@
   >
     <div
       class="modal confirm-dialog"
+      use:dialog={{ onClose: onCancel, initialFocus: ".confirm-cancel" }}
       role="alertdialog"
       aria-modal="true"
       aria-labelledby="confirm-dialog-title"
@@ -68,7 +42,7 @@
     >
       <div class="confirm-icon"><Icon name="trash" size={22} /></div>
       <div class="confirm-copy">
-        <span class="page-kicker">{eyebrow}</span>
+        {#if eyebrow}<span class="page-kicker">{eyebrow}</span>{/if}
         <h2 id="confirm-dialog-title">{title}</h2>
         <p id="confirm-dialog-message">{message}</p>
 
@@ -82,11 +56,11 @@
       </div>
 
       <footer class="confirm-actions">
-        <button bind:this={cancelButton} type="button" class="ghost-button" onclick={onCancel}>
+        <button type="button" class="ghost-button confirm-cancel" onclick={onCancel}>
           {cancelLabel}
         </button>
         <button
-          bind:this={confirmButton}
+
           type="button"
           class="danger-button confirm-button"
           onclick={onConfirm}
@@ -109,7 +83,7 @@
     gap: 14px;
     width: min(470px, 100%);
     padding: 22px;
-    overflow: visible;
+    overflow-y: auto;
     animation: confirm-appear 140ms ease-out;
   }
 
@@ -131,7 +105,7 @@
   .confirm-copy h2 {
     margin: 5px 0 8px;
     color: #26332c;
-    font-size: 17px;
+    font-size: var(--text-dialog);
     line-height: 1.3;
     letter-spacing: -0.025em;
   }
@@ -139,7 +113,7 @@
   .confirm-copy p {
     margin: 0;
     color: #78837c;
-    font-size: 10.5px;
+    font-size: var(--text-secondary);
     line-height: 1.55;
   }
 
@@ -153,7 +127,7 @@
   .confirm-details span {
     padding: 5px 7px;
     color: #766464;
-    font-size: 9.5px;
+    font-size: var(--text-secondary);
     border: 1px solid #eadede;
     border-radius: 7px;
     background: #fbf7f7;
@@ -163,6 +137,7 @@
     display: flex;
     grid-column: 1 / -1;
     justify-content: flex-end;
+    flex-wrap: wrap;
     gap: 8px;
     margin-top: 4px;
     padding-top: 17px;

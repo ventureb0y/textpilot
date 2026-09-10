@@ -86,6 +86,7 @@
       event.preventDefault();
       choose(highlightedIndex);
     } else if (event.key === "Escape" || event.key === "Tab") {
+      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); }
       open = false;
     }
   }
@@ -158,7 +159,7 @@
     padding: 9px 10px 9px 11px;
     color: #29362e;
     font: inherit;
-    font-size: 11.5px;
+    font-size: var(--text-secondary);
     text-align: left;
     border: 1px solid #d7ddd8;
     border-radius: 9px;
@@ -230,7 +231,7 @@
     padding: 8px 9px;
     color: #445149;
     font: inherit;
-    font-size: 10.5px;
+    font-size: var(--text-secondary);
     text-align: left;
     border: 0;
     border-radius: 7px;
@@ -245,7 +246,7 @@
 
   .select-menu button.selected {
     color: #2f7250;
-    font-weight: 650;
+    font-weight: 600;
     background: #e7f2eb;
   }
 

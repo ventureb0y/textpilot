@@ -1,7 +1,5 @@
 :root {
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    sans-serif;
+  font-family: var(--font-ui);
   color: #edf0f5;
   background: #111318;
   font-synthesis: none;
@@ -56,8 +54,8 @@ header {
   border-radius: 9px;
   color: #071512;
   background: #48d8ba;
-  font-size: 16px;
-  font-weight: 900;
+  font-size: var(--text-body);
+  font-weight: 700;
 }
 
 header div:nth-child(2) {
@@ -66,12 +64,12 @@ header div:nth-child(2) {
 }
 
 header strong {
-  font-size: 14px;
+  font-size: var(--text-body);
 }
 
 header span {
   color: #858d9b;
-  font-size: 11px;
+  font-size: var(--text-secondary);
 }
 
 header > kbd {
@@ -107,7 +105,7 @@ header > kbd {
   color: #f4f6f9;
   background: transparent;
   padding: 0 11px;
-  font-size: 15px;
+  font-size: var(--text-body);
 }
 
 .search-field input::placeholder {
@@ -116,7 +114,7 @@ header > kbd {
 
 .result-count {
   color: #66707e;
-  font-size: 11px;
+  font-size: var(--text-secondary);
   font-variant-numeric: tabular-nums;
 }
 
@@ -154,7 +152,7 @@ header > kbd {
 
 .phrase-main strong {
   overflow: hidden;
-  font-size: 13px;
+  font-size: var(--text-body);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -162,7 +160,7 @@ header > kbd {
 .phrase-main small {
   overflow: hidden;
   color: #808998;
-  font-size: 11px;
+  font-size: var(--text-secondary);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -178,7 +176,7 @@ header > kbd {
   max-width: 180px;
   overflow: hidden;
   color: #747d8b;
-  font-size: 10px;
+  font-size: var(--text-secondary);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -188,8 +186,8 @@ header > kbd {
   border-radius: 5px;
   color: #68dec6;
   background: rgb(72 216 186 / 8%);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 11px;
+  font-family: var(--font-mono);
+  font-size: var(--text-secondary);
 }
 
 .phrase-meta code.word-badge {
@@ -205,13 +203,13 @@ header > kbd {
   place-content: center;
   justify-items: center;
   color: #78818f;
-  font-size: 12px;
+  font-size: var(--text-secondary);
   gap: 7px;
 }
 
 .empty strong {
   color: #c9ced7;
-  font-size: 14px;
+  font-size: var(--text-body);
 }
 
 .empty.error {
@@ -225,7 +223,7 @@ footer {
   padding: 0 18px;
   border-top: 1px solid rgb(255 255 255 / 7%);
   color: #707987;
-  font-size: 10px;
+  font-size: var(--text-secondary);
   gap: 18px;
 }
 
@@ -244,7 +242,10 @@ kbd {
   color: #9ba3af;
   background: rgb(255 255 255 / 5%);
   font-family: inherit;
-  font-size: 9px;
+  font-size: var(--text-secondary);
   font-weight: 700;
   text-align: center;
 }
+
+.search-shell:has(.insertion-error) { grid-template-rows: auto auto minmax(0, 1fr) auto auto; }
+.insertion-error { margin: 0; padding: 8px 16px; font-size: 12px; color: #ffc1b9; overflow-wrap: anywhere; }

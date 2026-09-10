@@ -1,0 +1,20 @@
+{
+  "passed": [
+    "Real IPC: create phrase through UI",
+    "Phrase enable/disable persisted",
+    "Create dictionary word and toggle persisted",
+    "Profile backup restore through UI",
+    "Quick search loaded real SQLite results through Tauri event"
+  ],
+  "quickSearchResults": 2,
+  "viewport": {
+    "width": 1100,
+    "height": 720,
+    "devicePixelRatio": 1
+  },
+  "limitations": [
+    "Tauri capability core:window:allow-set-size is not enabled: native resize automation not performed",
+    "No OS-wide typing or insertion into another application",
+    "Native screenshot at current Windows DPI only; browser matrix covers layouts at other sizes"
+  ]
+}

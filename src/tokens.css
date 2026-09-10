@@ -1,0 +1,13 @@
+:root {
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", sans-serif;
+  --font-mono: Consolas, monospace;
+  --text-body: 14px;
+  --text-secondary: 12px;
+  --text-title: 24px;
+  --text-dialog: 20px;
+  font-size: var(--text-body);
+}
+:where(button, input, textarea, select, summary, [tabindex]):focus-visible {
+  outline: 2px solid #328264;
+  outline-offset: 3px;
+}

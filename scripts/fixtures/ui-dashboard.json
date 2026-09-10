@@ -1,0 +1,102 @@
+{
+  "profiles": [
+    {
+      "id": 1,
+      "name": "Основной",
+      "isActive": true,
+      "categoryCount": 3,
+      "phraseCount": 4,
+      "dictionaryCount": 146
+    }
+  ],
+  "activeProfileId": 1,
+  "dictionaryCount": 146,
+  "isPaused": false,
+  "engineAvailable": true,
+  "dictionaryAutocompleteEnabled": true,
+  "quickSearchEnabled": true,
+  "categories": [
+    {
+      "id": 1,
+      "parentId": null,
+      "name": "Продажи",
+      "path": "Продажи",
+      "phraseCount": 2,
+      "wordCount": 3
+    },
+    {
+      "id": 2,
+      "parentId": null,
+      "name": "Поддержка",
+      "path": "Поддержка",
+      "phraseCount": 1,
+      "wordCount": 1
+    },
+    {
+      "id": 3,
+      "parentId": null,
+      "name": "Документы",
+      "path": "Документы",
+      "phraseCount": 1,
+      "wordCount": 0
+    }
+  ],
+  "phrases": [
+    {
+      "id": 1,
+      "categoryId": 1,
+      "title": "Коммерческое предложение",
+      "snippet": "кп",
+      "body": "Здравствуйте! Отправляю вам коммерческое предложение. Если возникнут вопросы — напишите, пожалуйста.",
+      "description": "Первичный ответ клиенту",
+      "isEnabled": true
+    },
+    {
+      "id": 2,
+      "categoryId": 1,
+      "title": "Срок изготовления",
+      "snippet": "сроки",
+      "body": "Стандартный срок изготовления — от 3 до 5 рабочих дней после согласования макета.",
+      "description": "",
+      "isEnabled": true
+    },
+    {
+      "id": 3,
+      "categoryId": 2,
+      "title": "Уточнение проблемы",
+      "snippet": "уточнить",
+      "body": "Подскажите, пожалуйста, в какой момент возникает ошибка и какой текст вы видите на экране?",
+      "description": "",
+      "isEnabled": true
+    },
+    {
+      "id": 4,
+      "categoryId": 3,
+      "title": "Запрос реквизитов",
+      "snippet": "рекв",
+      "body": "Пришлите, пожалуйста, карточку организации с актуальными реквизитами.",
+      "description": "",
+      "isEnabled": true
+    }
+  ],
+  "dictionaryWords": [
+    {
+      "id": 1,
+      "categoryId": 1,
+      "word": "коммерческое",
+      "priority": 10,
+      "isEnabled": true,
+      "autocompleteEnabled": true,
+      "autocorrectEnabled": true
+    },
+    {
+      "id": 2,
+      "categoryId": 1,
+      "word": "предложение",
+      "priority": 8,
+      "isEnabled": true,
+      "autocompleteEnabled": true,
+      "autocorrectEnabled": true
+    }
+  ]
+}

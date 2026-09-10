@@ -18,6 +18,14 @@
   let searchInput: HTMLInputElement;
   let loading = true;
   let error = "";
+  let insertionError = "";
+  let inserting = false;
+  let resultsElement: HTMLElement;
+  $: scrollSelection(selectedIndex, results);
+  async function scrollSelection(index: number, _results: SearchItem[]) {
+    await tick();
+    resultsElement?.querySelectorAll("button")[index]?.scrollIntoView({ block: "nearest" });
+  }
 
   $: normalizedQuery = query.trim().toLocaleLowerCase("ru");
   $: results = normalizedQuery
@@ -33,6 +41,7 @@
     query = "";
     selectedIndex = 0;
     error = "";
+    insertionError = "";
     loading = true;
 
     try {
@@ -51,11 +60,14 @@
   }
 
   async function insertItem(item: SearchItem | undefined) {
-    if (!item) return;
-    await invoke("insert_quick_search_item", {
-      kind: item.kind,
-      itemId: item.id,
-    });
+    if (!item || inserting) return;
+    insertionError = "";
+    inserting = true;
+    try {
+      await invoke("insert_quick_search_item", { kind: item.kind, itemId: item.id });
+    } catch (cause) {
+      insertionError = "Не удалось вставить текст: " + String(cause);
+    } finally { inserting = false; }
   }
 
   function handleKeydown(event: KeyboardEvent) {
@@ -64,7 +76,7 @@
       void closeSearch();
     } else if (event.key === "ArrowDown") {
       event.preventDefault();
-      selectedIndex = Math.min(selectedIndex + 1, results.length - 1);
+      selectedIndex = Math.max(0, Math.min(selectedIndex + 1, results.length - 1));
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
       selectedIndex = Math.max(selectedIndex - 1, 0);
@@ -102,17 +114,18 @@
       <path d="m16.5 16.5 4 4"></path>
     </svg>
     <input
+      aria-label="Поиск фраз и слов"
       bind:this={searchInput}
       bind:value={query}
-      oninput={() => (selectedIndex = 0)}
-      placeholder="Фраза, сниппет, слово, текст или категория"
+      oninput={() => { selectedIndex = 0; insertionError = ""; }}
+      placeholder="Фраза, сокращение, слово, текст или категория"
       autocomplete="off"
       spellcheck="false"
     />
     <span class="result-count">{results.length}</span>
   </div>
 
-  <section class="results">
+  <section class="results" bind:this={resultsElement}>
     {#if loading}
       <div class="empty">Загружаю фразы...</div>
     {:else if error}
@@ -120,7 +133,7 @@
     {:else if results.length === 0}
       <div class="empty">
         <strong>Ничего не найдено</strong>
-        <span>Попробуй другое слово или сниппет</span>
+        <span>Попробуйте другое слово или сокращение</span>
       </div>
     {:else}
       {#each results as item, index (`${item.kind}-${item.id}`)}
@@ -146,6 +159,7 @@
     {/if}
   </section>
 
+  {#if insertionError}<p class="insertion-error" role="alert">{insertionError}</p>{/if}
   <footer>
     <span><kbd>↑</kbd><kbd>↓</kbd> выбор</span>
     <span><kbd>Enter</kbd> вставить</span>
